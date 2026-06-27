@@ -6,11 +6,13 @@ import {
   ClipboardList,
   CreditCard,
   FileText,
+  Pencil,
   Plus,
   Printer,
   RefreshCw,
   Search,
   Settings,
+  Trash2,
   Users
 } from "lucide-react";
 import Link from "next/link";
@@ -121,15 +123,26 @@ const paymentMethods: PaymentMethod[] = ["Не оплачено", "Наличн�
 const statuses: VisitStatus[] = ["Запланирован", "В работе", "Завершён", "Оплачен"];
 const storageKey = "m1-autoservice-mvp-v2";
 
-const today = new Date();
 const dayMs = 24 * 60 * 60 * 1000;
 
 function isoDate(date: Date) {
   return date.toISOString().slice(0, 10);
 }
 
+function todayDate() {
+  return new Date();
+}
+
+function todayIsoDate() {
+  return isoDate(todayDate());
+}
+
+function addDaysFrom(base: Date, days: number) {
+  return isoDate(new Date(base.getTime() + days * dayMs));
+}
+
 function addDays(days: number) {
-  return isoDate(new Date(today.getTime() + days * dayMs));
+  return addDaysFrom(todayDate(), days);
 }
 
 function currentTime() {
@@ -183,7 +196,7 @@ function nextAppointmentId(appointments: Appointment[]) {
   return `a-${next}`;
 }
 
-function statusForPayment(paymentMethod: PaymentMethod, current: VisitStatus) {
+function statusForPayment(paymentMethod: PaymentMethod, current: VisitStatus): VisitStatus {
   if (paymentMethod !== "Не оплачено") return "Оплачен";
   return current === "Оплачен" ? "Завершён" : current;
 }
@@ -209,7 +222,7 @@ function parseItems(text: string, fallbackAmount: number): WorkItem[] {
   }));
 }
 
-function createEmptyForm(): VisitForm {
+function createEmptyForm(mechanics?: Mechanic[]): VisitForm {
   return {
     time: currentTime(),
     client: "",
@@ -218,11 +231,11 @@ function createEmptyForm(): VisitForm {
     plate: "",
     mileage: "",
     vin: "",
-    worksText: "Замена масла",
-    mechanic: "Аркаша",
-    laborAmount: "2500",
+    worksText: "",
+    mechanic: mechanics?.[0]?.name ?? "",
+    laborAmount: "",
     partsText: "",
-    partsAmount: "0",
+    partsAmount: "",
     paymentMethod: "Не оплачено",
     status: "В работе",
     comment: ""
@@ -237,7 +250,7 @@ function createEmptyAppointmentForm(): AppointmentForm {
     phone: "",
     car: "",
     plate: "",
-    plannedService: "Замена масла",
+    plannedService: "",
     comment: ""
   };
 }
@@ -401,33 +414,35 @@ type SectionId = (typeof nav)[number]["id"];
 
 export default function M1Journal({ section = "today", initialOrderId }: { section?: SectionId; initialOrderId?: string }) {
   const router = useRouter();
-  const [state, setState] = useState<AppState>(mockState);
-  const [formOpen, setFormOpen] = useState(false);
-  const [detailVisit, setDetailVisit] = useState<Visit | null>(null);
-  const [paymentVisit, setPaymentVisit] = useState<Visit | null>(null);
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("Наличные");
-  const [selectedOrderId, setSelectedOrderId] = useState(initialOrderId ?? mockState.visits[0].id);
-  const [clientSearch, setClientSearch] = useState("");
-  const [form, setForm] = useState<VisitForm>(() => createEmptyForm());
-  const [formError, setFormError] = useState("");
-  const [notice, setNotice] = useState("");
-
-  useEffect(() => {
+  const [state, setState] = useState<AppState>(() => {
+    if (typeof window === "undefined") return mockState;
     const saved = window.localStorage.getItem(storageKey);
     if (saved) {
       try {
-        setState(JSON.parse(saved) as AppState);
+        return JSON.parse(saved) as AppState;
       } catch {
         window.localStorage.removeItem(storageKey);
       }
     }
-  }, []);
+    return mockState;
+  });
+  const [formOpen, setFormOpen] = useState(false);
+  const [detailVisit, setDetailVisit] = useState<Visit | null>(null);
+  const [paymentVisit, setPaymentVisit] = useState<Visit | null>(null);
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("Наличные");
+  const [selectedOrderId, setSelectedOrderId] = useState(() => initialOrderId ?? state.visits[0]?.id ?? "");
+  const [clientSearch, setClientSearch] = useState("");
+  const [form, setForm] = useState<VisitForm>(() => createEmptyForm(state.mechanics));
+  const [formError, setFormError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [editingVisit, setEditingVisit] = useState<Visit | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
 
   useEffect(() => {
     window.localStorage.setItem(storageKey, JSON.stringify(state));
   }, [state]);
 
-  const todayIso = isoDate(today);
+  const todayIso = todayIsoDate();
   const todayVisits = useMemo(() => state.visits.filter((visit) => visit.date === todayIso), [state.visits, todayIso]);
   const selectedOrder = state.visits.find((visit) => visit.id === selectedOrderId) ?? todayVisits[0] ?? state.visits[0];
 
@@ -466,7 +481,29 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
     setPaymentVisit(null);
   }
 
-  function addVisit() {
+  function startEditVisit(visit: Visit) {
+    setEditingVisit(visit);
+    setForm({
+      time: visit.time,
+      client: visit.client,
+      phone: visit.phone,
+      car: visit.car,
+      plate: visit.plate,
+      mileage: visit.mileage,
+      vin: visit.vin,
+      worksText: visit.works.map((w) => w.name).join(", "),
+      mechanic: visit.mechanic,
+      laborAmount: String(visit.laborAmount),
+      partsText: visit.parts.map((p) => p.name).join(", "),
+      partsAmount: String(visit.partsAmount),
+      paymentMethod: visit.paymentMethod,
+      status: visit.status,
+      comment: visit.comment
+    });
+    setFormOpen(true);
+  }
+
+  function saveVisit() {
     if (!form.car.trim() || !form.worksText.trim() || !form.mechanic.trim() || Number(form.laborAmount) <= 0) {
       setFormError("Заполните автомобиль, работу, механика и сумму работ.");
       return;
@@ -474,9 +511,7 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
 
     const laborAmount = Number(form.laborAmount) || 0;
     const partsAmount = Number(form.partsAmount) || 0;
-    const visit: Visit = {
-      id: nextVisitId(state.visits),
-      date: todayIso,
+    const visitData = {
       time: form.time || currentTime(),
       client: form.client.trim(),
       phone: form.phone.trim(),
@@ -494,12 +529,38 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
       comment: form.comment.trim()
     };
 
-    setState((current) => ({ ...current, visits: [visit, ...current.visits] }));
-    setSelectedOrderId(visit.id);
-    setForm(createEmptyForm());
+    if (editingVisit) {
+      updateVisit(editingVisit.id, visitData);
+      showNotice(`Заезд обновлён: ${visitData.car}`);
+    } else {
+      const visit: Visit = {
+        id: nextVisitId(state.visits),
+        date: todayIso,
+        ...visitData
+      };
+      setState((current) => ({ ...current, visits: [visit, ...current.visits] }));
+      setSelectedOrderId(visit.id);
+      showNotice(`Заезд добавлен: ${visit.car}`);
+    }
+
+    setEditingVisit(null);
+    setForm(createEmptyForm(state.mechanics));
     setFormError("");
     setFormOpen(false);
-    showNotice(`Заезд добавлен: ${visit.car}`);
+  }
+
+  function deleteVisit(id: string) {
+    const visit = state.visits.find((v) => v.id === id);
+    setState((current) => ({
+      ...current,
+      visits: current.visits.filter((v) => v.id !== id)
+    }));
+    setDeleteConfirm(null);
+    if (visit) showNotice(`Заезд удалён: ${visit.car}`);
+  }
+
+  function changeVisitStatus(id: string, status: VisitStatus) {
+    updateVisit(id, { status });
   }
 
   function addAppointment(form: AppointmentForm) {
@@ -557,13 +618,14 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
   }
 
   function moveAppointment(appointment: Appointment) {
+    const nextDay = addDaysFrom(new Date(`${appointment.date}T12:00:00`), 1);
     setState((current) => ({
       ...current,
       appointments: current.appointments.map((item) =>
-        item.id === appointment.id ? { ...item, date: addDays(1) } : item
+        item.id === appointment.id ? { ...item, date: nextDay } : item
       )
     }));
-    showNotice("Запись перенесена на завтра");
+    showNotice(`Запись перенесена на ${formatDate(nextDay)}`);
   }
 
   function cancelAppointment(appointment: Appointment) {
@@ -629,20 +691,24 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
               <p className="text-xs text-muted-foreground">{formatDate(todayIso)}</p>
             </div>
             <div className="flex items-center gap-3">
-              <Dialog open={formOpen} onOpenChange={(open) => {
-                setFormOpen(open);
-                if (open) setForm((current) => ({ ...current, time: current.time || currentTime() }));
-                if (!open) setFormError("");
+              <Button className="gap-2 rounded-lg bg-blue-600 shadow-md shadow-blue-600/25 hover:bg-blue-700" onClick={() => {
+                setEditingVisit(null);
+                setForm(createEmptyForm(state.mechanics));
+                setFormOpen(true);
               }}>
-                <DialogTrigger asChild>
-                  <Button className="gap-2 rounded-lg bg-blue-600 shadow-md shadow-blue-600/25 hover:bg-blue-700">
-                    <Plus className="h-4 w-4" />
-                    Добавить заезд
-                  </Button>
-                </DialogTrigger>
+                <Plus className="h-4 w-4" />
+                Новый заезд
+              </Button>
+              <Dialog open={formOpen} onOpenChange={(open) => {
+                if (!open) {
+                  setFormOpen(false);
+                  setEditingVisit(null);
+                  setFormError("");
+                }
+              }}>
                 <DialogContent>
                   <DialogHeader>
-                    <DialogTitle>Новый заезд</DialogTitle>
+                    <DialogTitle>{editingVisit ? "Редактировать заезд" : "Новый заезд"}</DialogTitle>
                   </DialogHeader>
                   <VisitFormView
                     form={form}
@@ -653,7 +719,7 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
                       setForm(nextForm);
                       if (formError) setFormError("");
                     }}
-                    onSubmit={addVisit}
+                    onSubmit={saveVisit}
                   />
                 </DialogContent>
               </Dialog>
@@ -681,6 +747,12 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
                 router.push(`/orders?order=${encodeURIComponent(visit.id)}`);
               }}
               onPaid={markPaid}
+              onEdit={startEditVisit}
+              onDelete={(id) => setDeleteConfirm(id)}
+              onStatusChange={changeVisitStatus}
+              deleteConfirm={deleteConfirm}
+              onDeleteConfirm={deleteVisit}
+              onDeleteCancel={() => setDeleteConfirm(null)}
             />
           )}
 
@@ -875,7 +947,13 @@ function TodaySection({
   totals,
   onOpen,
   onOrder,
-  onPaid
+  onPaid,
+  onEdit,
+  onDelete,
+  onStatusChange,
+  deleteConfirm,
+  onDeleteConfirm,
+  onDeleteCancel
 }: {
   date: string;
   visits: Visit[];
@@ -883,21 +961,31 @@ function TodaySection({
   onOpen: (visit: Visit) => void;
   onOrder: (visit: Visit) => void;
   onPaid: (visit: Visit) => void;
+  onEdit: (visit: Visit) => void;
+  onDelete: (id: string) => void;
+  onStatusChange: (id: string, status: VisitStatus) => void;
+  deleteConfirm: string | null;
+  onDeleteConfirm: (id: string) => void;
+  onDeleteCancel: () => void;
 }) {
   const sortedVisits = [...visits].sort((a, b) => (a.time || "99:99").localeCompare(b.time || "99:99"));
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8">
-        <StatCard label="Заезды сегодня" value={totals.visits} />
+      <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
+        <StatCard label="Заезды" value={totals.visits} />
         <StatCard label="Выручка" value={formatMoney(totals.total)} />
-        <StatCard label="Наличные" value={formatMoney(totals.byPayment["Наличные"])} />
-        <StatCard label="Перевод" value={formatMoney(totals.byPayment["Перевод"])} />
-        <StatCard label="Терминал" value={formatMoney(totals.byPayment["Терминал"])} />
-        <StatCard label="Безнал" value={formatMoney(totals.byPayment["Безнал"])} />
         <StatCard label="Не оплачено" value={formatMoney(totals.unpaid)} />
         <StatCard label="Чистыми" value={formatMoney(totals.clean)} />
       </div>
+      {totals.visits > 0 && (
+        <div className="flex flex-wrap gap-4 rounded-lg border border-border/40 bg-white/60 px-4 py-2.5 text-xs text-muted-foreground">
+          <span>Наличные: <b className="text-foreground">{formatMoney(totals.byPayment["Наличные"])}</b></span>
+          <span>Перевод: <b className="text-foreground">{formatMoney(totals.byPayment["Перевод"])}</b></span>
+          <span>Терминал: <b className="text-foreground">{formatMoney(totals.byPayment["Терминал"])}</b></span>
+          <span>Безнал: <b className="text-foreground">{formatMoney(totals.byPayment["Безнал"])}</b></span>
+        </div>
+      )}
       <div className="overflow-hidden rounded-xl border border-border/60 bg-white shadow-sm lg:overflow-x-auto">
         {sortedVisits.length ? sortedVisits.map((visit, index) => (
           <VisitRow
@@ -907,12 +995,17 @@ function TodaySection({
             onOpen={onOpen}
             onOrder={onOrder}
             onPaid={onPaid}
+            onEdit={onEdit}
+            onDelete={onDelete}
+            onStatusChange={onStatusChange}
+            deleteConfirm={deleteConfirm}
+            onDeleteConfirm={onDeleteConfirm}
+            onDeleteCancel={onDeleteCancel}
           />
         )) : (
           <EmptyState title="Заездов сегодня пока нет" text="Добавьте первый заезд через кнопку в верхней панели." />
         )}
       </div>
-      <MechanicTotalsTable rows={totals.mechanicRows} />
     </div>
   );
 }
@@ -922,18 +1015,32 @@ function VisitRow({
   visit,
   onOpen,
   onOrder,
-  onPaid
+  onPaid,
+  onEdit,
+  onDelete,
+  onStatusChange,
+  deleteConfirm,
+  onDeleteConfirm,
+  onDeleteCancel
 }: {
   index: number;
   visit: Visit;
   onOpen: (visit: Visit) => void;
   onOrder: (visit: Visit) => void;
   onPaid: (visit: Visit) => void;
+  onEdit: (visit: Visit) => void;
+  onDelete: (id: string) => void;
+  onStatusChange: (id: string, status: VisitStatus) => void;
+  deleteConfirm: string | null;
+  onDeleteConfirm: (id: string) => void;
+  onDeleteCancel: () => void;
 }) {
+  const isDeleting = deleteConfirm === visit.id;
+
   return (
     <>
       {index === 0 && (
-        <div className="hidden min-w-[1180px] grid-cols-[44px_70px_1.25fr_1.25fr_1.4fr_92px_96px_96px_96px_100px_110px_220px] gap-3 border-b border-border/60 bg-slate-50/80 px-4 py-3 text-xs font-medium uppercase tracking-wider text-muted-foreground lg:grid">
+        <div className="hidden min-w-[960px] grid-cols-[36px_56px_1fr_1fr_1.2fr_80px_84px_84px_84px_88px_120px_200px] gap-3 border-b border-border/60 bg-slate-50/80 px-4 py-3 text-xs font-medium uppercase tracking-wider text-muted-foreground lg:grid">
           <span>№</span>
           <span>Время</span>
           <span>Авто / госномер</span>
@@ -948,7 +1055,7 @@ function VisitRow({
           <span className="text-right">Действия</span>
         </div>
       )}
-      <div className="hidden min-w-[1180px] grid-cols-[44px_70px_1.25fr_1.25fr_1.4fr_92px_96px_96px_96px_100px_110px_220px] gap-3 border-b border-border/40 px-4 py-3.5 text-sm transition-colors last:border-b-0 hover:bg-slate-50/50 lg:grid lg:items-center">
+      <div className={`hidden min-w-[960px] grid-cols-[36px_56px_1fr_1fr_1.2fr_80px_84px_84px_84px_88px_120px_200px] gap-3 border-b border-border/40 px-4 py-3.5 text-sm transition-colors last:border-b-0 hover:bg-slate-50/50 lg:grid lg:items-center ${isDeleting ? "bg-red-50/50" : ""}`}>
         <span className="text-muted-foreground">{index + 1}</span>
         <span className="font-medium">{visit.time || "—"}</span>
         <div className="min-w-0">
@@ -965,13 +1072,35 @@ function VisitRow({
         <span className="text-right">{formatMoney(visit.partsAmount)}</span>
         <span className="text-right font-semibold">{formatMoney(visitTotal(visit))}</span>
         <span>{visit.paymentMethod}</span>
-        <Badge className={statusClass(visit.status)}>{visit.status}</Badge>
-        <div className="flex flex-wrap justify-end gap-2">
-          <Button variant="secondary" size="sm" onClick={() => onOpen(visit)}>Открыть</Button>
-          <Button variant="secondary" size="sm" onClick={() => onOrder(visit)}>ЗН</Button>
-          <Button size="sm" onClick={() => onPaid(visit)}>
-            {isPaid(visit) ? "Оплата" : "Оплатить"}
-          </Button>
+        <NativeSelect
+          value={visit.status}
+          onChange={(e) => onStatusChange(visit.id, e.target.value as VisitStatus)}
+          className="!h-8 !rounded !px-2 !py-1 !text-xs"
+        >
+          {statuses.map((s) => <option key={s} value={s}>{s}</option>)}
+        </NativeSelect>
+        <div className="flex flex-wrap justify-end gap-1">
+          {isDeleting ? (
+            <>
+              <Button variant="secondary" size="sm" className="h-7 text-xs" onClick={onDeleteCancel}>Нет</Button>
+              <Button size="sm" className="h-7 bg-red-600 text-xs hover:bg-red-700" onClick={() => onDeleteConfirm(visit.id)}>Да, удалить</Button>
+            </>
+          ) : (
+            <>
+              <Button variant="secondary" size="sm" className="h-7 w-7 p-0" onClick={() => onEdit(visit)} title="Редактировать">
+                <Pencil className="h-3.5 w-3.5" />
+              </Button>
+              <Button variant="secondary" size="sm" className="h-7 w-7 p-0" onClick={() => onOrder(visit)} title="Заказ-наряд">
+                <FileText className="h-3.5 w-3.5" />
+              </Button>
+              <Button size="sm" className="h-7 px-2 text-xs" onClick={() => onPaid(visit)}>
+                {isPaid(visit) ? "Оплата" : "Оплатить"}
+              </Button>
+              <Button variant="secondary" size="sm" className="h-7 w-7 p-0 text-red-500 hover:bg-red-50 hover:text-red-600" onClick={() => onDelete(visit.id)} title="Удалить">
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            </>
+          )}
         </div>
       </div>
       <div className="space-y-3 border-b border-border p-3 last:border-b-0 lg:hidden">
@@ -997,11 +1126,12 @@ function VisitRow({
           <Info label="Оплата" value={visit.paymentMethod} />
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" size="sm" onClick={() => onOpen(visit)}>Открыть</Button>
+          <Button variant="secondary" size="sm" onClick={() => onEdit(visit)}>Редактировать</Button>
           <Button variant="secondary" size="sm" onClick={() => onOrder(visit)}>Заказ-наряд</Button>
           <Button size="sm" onClick={() => onPaid(visit)}>
             {isPaid(visit) ? "Изменить оплату" : "Оплатить"}
           </Button>
+          <Button variant="secondary" size="sm" className="text-red-500" onClick={() => onDelete(visit.id)}>Удалить</Button>
         </div>
       </div>
     </>
@@ -1698,7 +1828,7 @@ function StatsSection({ visits, mechanics }: { visits: Visit[]; mechanics: Mecha
       <h2 className="text-2xl font-semibold">Статистика</h2>
       <div className="grid gap-4 xl:grid-cols-3">
         {periods.map((period) => {
-          const from = new Date(today.getTime() - (period.days - 1) * dayMs);
+          const from = new Date(todayDate().getTime() - (period.days - 1) * dayMs);
           const slice = visits.filter((visit) => new Date(`${visit.date}T12:00:00`) >= from);
           const total = sum(slice.map(visitTotal));
           const paid = sum(slice.filter(isPaid).map(visitTotal));
