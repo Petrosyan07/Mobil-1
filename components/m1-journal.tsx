@@ -584,80 +584,92 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
   }
 
   return (
-    <main className="min-h-screen bg-[#f6f8fb]">
-      <div className="no-print sticky top-0 z-40 border-b border-border bg-white/95 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl flex-col gap-3 px-4 py-3 sm:px-6">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div className="min-w-0">
-              <p className="text-sm font-semibold text-blue-700">М1 / Mobil 1 Центр</p>
-              <h1 className="mt-0.5 text-xl font-semibold tracking-normal text-foreground sm:text-2xl">Ежедневный журнал</h1>
+    <main className="flex min-h-screen bg-[hsl(var(--background))]">
+      <aside className="no-print fixed inset-y-0 left-0 z-50 flex w-[220px] flex-col border-r border-slate-800 bg-[hsl(var(--sidebar))]">
+        <div className="flex h-16 items-center gap-3 border-b border-slate-800 px-5">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-600 text-sm font-bold text-white">M1</div>
+          <div className="min-w-0">
+            <p className="truncate text-sm font-semibold text-white">Mobil 1 Центр</p>
+            <p className="truncate text-xs text-slate-400">Журнал</p>
+          </div>
+        </div>
+        <nav className="flex-1 space-y-1 px-3 py-4">
+          {nav.map((item) => {
+            const Icon = item.icon;
+            const active = section === item.id;
+            return (
+              <Link
+                key={item.id}
+                href={item.href}
+                className={`flex h-10 items-center gap-3 rounded-lg px-3 text-sm font-medium transition-all ${
+                  active
+                    ? "bg-blue-600 text-white shadow-lg shadow-blue-600/25"
+                    : "text-slate-400 hover:bg-[hsl(var(--sidebar-hover))] hover:text-white"
+                }`}
+              >
+                <Icon className="h-[18px] w-[18px] shrink-0" />
+                <span>{item.label}</span>
+              </Link>
+            );
+          })}
+        </nav>
+        <div className="border-t border-slate-800 p-3">
+          <Button variant="secondary" size="sm" onClick={resetDemo} className="w-full justify-center gap-2 border-slate-700 bg-transparent text-slate-400 hover:bg-slate-800 hover:text-white">
+            <RefreshCw className="h-3.5 w-3.5" />
+            Сбросить демо
+          </Button>
+        </div>
+      </aside>
+
+      <div className="flex-1 pl-[220px]">
+        <header className="no-print sticky top-0 z-40 border-b border-border bg-white/80 backdrop-blur-xl">
+          <div className="flex h-16 items-center justify-between px-8">
+            <div>
+              <h1 className="text-lg font-semibold text-foreground">{nav.find((item) => item.id === section)?.label ?? "Сегодня"}</h1>
+              <p className="text-xs text-muted-foreground">{formatDate(todayIso)}</p>
             </div>
-            <div className="flex flex-wrap gap-2">
-              <Button variant="secondary" onClick={resetDemo}>
-                <RefreshCw className="h-4 w-4" />
-                Сбросить демо
-              </Button>
+            <div className="flex items-center gap-3">
               <Dialog open={formOpen} onOpenChange={(open) => {
                 setFormOpen(open);
                 if (open) setForm((current) => ({ ...current, time: current.time || currentTime() }));
                 if (!open) setFormError("");
               }}>
-            <DialogTrigger asChild>
-              <Button>
-                <Plus className="h-4 w-4" />
-                Добавить заезд
-              </Button>
-            </DialogTrigger>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>Новый заезд</DialogTitle>
-              </DialogHeader>
-              <VisitFormView
-                form={form}
-                error={formError}
-                mechanics={state.mechanics}
-                services={state.services}
-                onChange={(nextForm) => {
-                  setForm(nextForm);
-                  if (formError) setFormError("");
-                }}
-                onSubmit={addVisit}
-              />
-            </DialogContent>
+                <DialogTrigger asChild>
+                  <Button className="gap-2 rounded-lg bg-blue-600 shadow-md shadow-blue-600/25 hover:bg-blue-700">
+                    <Plus className="h-4 w-4" />
+                    Добавить заезд
+                  </Button>
+                </DialogTrigger>
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>Новый заезд</DialogTitle>
+                  </DialogHeader>
+                  <VisitFormView
+                    form={form}
+                    error={formError}
+                    mechanics={state.mechanics}
+                    services={state.services}
+                    onChange={(nextForm) => {
+                      setForm(nextForm);
+                      if (formError) setFormError("");
+                    }}
+                    onSubmit={addVisit}
+                  />
+                </DialogContent>
               </Dialog>
             </div>
           </div>
-          <nav className="flex gap-1 overflow-x-auto pb-1">
-            {nav.map((item) => {
-              const Icon = item.icon;
-              const active = section === item.id;
-              return (
-                <Link
-                  key={item.id}
-                  href={item.href}
-                  className={`flex h-9 shrink-0 items-center gap-2 rounded-md px-3 text-sm font-medium transition-colors ${
-                    active
-                      ? "bg-blue-600 text-white shadow-sm"
-                      : "text-slate-700 hover:bg-slate-100"
-                  }`}
-                >
-                  <Icon className="h-4 w-4 shrink-0" />
-                  <span>{item.label}</span>
-                </Link>
-              );
-            })}
-          </nav>
-        </div>
-      </div>
+        </header>
 
-      {notice && (
-        <div className="no-print fixed right-4 top-24 z-50 rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm font-medium text-green-800 shadow-sm">
-          {notice}
-        </div>
-      )}
+        {notice && (
+          <div className="no-print fixed right-6 top-20 z-50 flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm font-medium text-green-700 shadow-lg shadow-green-100">
+            <CheckCircle2 className="h-4 w-4 shrink-0" />
+            {notice}
+          </div>
+        )}
 
-      <div className="no-print mx-auto max-w-7xl px-4 py-5 sm:px-6">
-        <section className="min-w-0">
+        <div className="no-print px-8 py-6">
+          <section className="min-w-0">
           {section === "today" && (
             <TodaySection
               date={todayIso}
@@ -713,6 +725,7 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
             <SettingsSection state={state} setState={setState} />
           )}
         </section>
+        </div>
       </div>
 
       <Dialog open={Boolean(detailVisit)} onOpenChange={(open) => !open && setDetailVisit(null)}>
@@ -838,10 +851,10 @@ function buildClients(visits: Visit[]) {
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (
-    <Card className="shadow-none">
-      <CardContent className="p-4">
-        <p className="text-sm text-muted-foreground">{label}</p>
-        <p className="mt-2 text-xl font-semibold tracking-normal">{value}</p>
+    <Card className="border-border/60 shadow-sm transition-shadow hover:shadow-md">
+      <CardContent className="p-5">
+        <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">{label}</p>
+        <p className="mt-2 text-xl font-semibold tracking-tight text-foreground">{value}</p>
       </CardContent>
     </Card>
   );
@@ -849,7 +862,7 @@ function StatCard({ label, value }: { label: string; value: string | number }) {
 
 function EmptyState({ title, text }: { title: string; text: string }) {
   return (
-    <div className="rounded-lg border border-dashed border-border bg-white p-6 text-center sm:col-span-2 xl:col-span-full">
+    <div className="rounded-xl border border-dashed border-border/60 bg-white/50 p-8 text-center sm:col-span-2 xl:col-span-full">
       <p className="font-semibold">{title}</p>
       <p className="mt-1 text-sm text-muted-foreground">{text}</p>
     </div>
@@ -874,13 +887,7 @@ function TodaySection({
   const sortedVisits = [...visits].sort((a, b) => (a.time || "99:99").localeCompare(b.time || "99:99"));
 
   return (
-    <div className="space-y-5">
-      <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-normal">Сегодня</h2>
-          <p className="text-sm text-muted-foreground">{formatDate(date)}</p>
-        </div>
-      </div>
+    <div className="space-y-6">
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8">
         <StatCard label="Заезды сегодня" value={totals.visits} />
         <StatCard label="Выручка" value={formatMoney(totals.total)} />
@@ -891,7 +898,7 @@ function TodaySection({
         <StatCard label="Не оплачено" value={formatMoney(totals.unpaid)} />
         <StatCard label="Чистыми" value={formatMoney(totals.clean)} />
       </div>
-      <div className="overflow-hidden rounded-lg border border-border bg-white lg:overflow-x-auto">
+      <div className="overflow-hidden rounded-xl border border-border/60 bg-white shadow-sm lg:overflow-x-auto">
         {sortedVisits.length ? sortedVisits.map((visit, index) => (
           <VisitRow
             key={visit.id}
@@ -926,7 +933,7 @@ function VisitRow({
   return (
     <>
       {index === 0 && (
-        <div className="hidden min-w-[1180px] grid-cols-[44px_70px_1.25fr_1.25fr_1.4fr_92px_96px_96px_96px_100px_110px_220px] gap-3 border-b border-border bg-slate-50 px-3 py-3 text-xs font-semibold uppercase text-muted-foreground lg:grid">
+        <div className="hidden min-w-[1180px] grid-cols-[44px_70px_1.25fr_1.25fr_1.4fr_92px_96px_96px_96px_100px_110px_220px] gap-3 border-b border-border/60 bg-slate-50/80 px-4 py-3 text-xs font-medium uppercase tracking-wider text-muted-foreground lg:grid">
           <span>№</span>
           <span>Время</span>
           <span>Авто / госномер</span>
@@ -941,7 +948,7 @@ function VisitRow({
           <span className="text-right">Действия</span>
         </div>
       )}
-      <div className="hidden min-w-[1180px] grid-cols-[44px_70px_1.25fr_1.25fr_1.4fr_92px_96px_96px_96px_100px_110px_220px] gap-3 border-b border-border px-3 py-3 text-sm last:border-b-0 lg:grid lg:items-center">
+      <div className="hidden min-w-[1180px] grid-cols-[44px_70px_1.25fr_1.25fr_1.4fr_92px_96px_96px_96px_100px_110px_220px] gap-3 border-b border-border/40 px-4 py-3.5 text-sm transition-colors last:border-b-0 hover:bg-slate-50/50 lg:grid lg:items-center">
         <span className="text-muted-foreground">{index + 1}</span>
         <span className="font-medium">{visit.time || "—"}</span>
         <div className="min-w-0">
@@ -1003,29 +1010,29 @@ function VisitRow({
 
 function MechanicTotalsTable({ rows }: { rows: ReturnType<typeof buildDayTotals>["mechanicRows"] }) {
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-white">
-      <div className="border-b border-border bg-slate-50 px-4 py-3">
-        <h3 className="font-semibold">Итог по мастерам</h3>
+    <div className="overflow-hidden rounded-xl border border-border/60 bg-white shadow-sm">
+      <div className="border-b border-border/60 bg-slate-50/80 px-5 py-3.5">
+        <h3 className="text-sm font-semibold">Итог по мастерам</h3>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[760px] border-collapse text-sm">
           <thead>
-            <tr className="border-b border-border bg-muted text-left text-muted-foreground">
+            <tr className="border-b border-border/60 text-left">
               {["Мастер", "Работ", "Сумма работ", "%", "Начислено", "Выдано", "Остаток"].map((header) => (
-                <th key={header} className="px-4 py-3 font-medium">{header}</th>
+                <th key={header} className="px-5 py-3 text-xs font-medium uppercase tracking-wider text-muted-foreground">{header}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {rows.map((row) => (
-              <tr key={row.mechanic} className="border-b border-border last:border-b-0">
-                <td className="px-4 py-3 font-medium">{row.mechanic}</td>
-                <td className="px-4 py-3">{row.works}</td>
-                <td className="px-4 py-3">{formatMoney(row.labor)}</td>
-                <td className="px-4 py-3">{row.percent}%</td>
-                <td className="px-4 py-3">{formatMoney(row.accrued)}</td>
-                <td className="px-4 py-3">{formatMoney(row.paid)}</td>
-                <td className="px-4 py-3 font-semibold">{formatMoney(row.balance)}</td>
+              <tr key={row.mechanic} className="border-b border-border/40 transition-colors last:border-b-0 hover:bg-slate-50/50">
+                <td className="px-5 py-3.5 font-medium">{row.mechanic}</td>
+                <td className="px-5 py-3.5">{row.works}</td>
+                <td className="px-5 py-3.5">{formatMoney(row.labor)}</td>
+                <td className="px-5 py-3.5">{row.percent}%</td>
+                <td className="px-5 py-3.5">{formatMoney(row.accrued)}</td>
+                <td className="px-5 py-3.5">{formatMoney(row.paid)}</td>
+                <td className="px-5 py-3.5 font-semibold">{formatMoney(row.balance)}</td>
               </tr>
             ))}
           </tbody>
@@ -1036,10 +1043,10 @@ function MechanicTotalsTable({ rows }: { rows: ReturnType<typeof buildDayTotals>
 }
 
 function statusClass(status: VisitStatus) {
-  if (status === "Оплачен") return "border-green-200 bg-green-50 text-green-700";
-  if (status === "Завершён") return "border-blue-200 bg-blue-50 text-blue-700";
-  if (status === "В работе") return "border-amber-200 bg-amber-50 text-amber-700";
-  return "";
+  if (status === "Оплачен") return "border-emerald-200 bg-emerald-50 text-emerald-700 font-medium";
+  if (status === "Завершён") return "border-blue-200 bg-blue-50 text-blue-700 font-medium";
+  if (status === "В работе") return "border-amber-200 bg-amber-50 text-amber-700 font-medium";
+  return "border-slate-200 bg-slate-50 text-slate-600 font-medium";
 }
 
 function VisitFormView({
@@ -1136,7 +1143,7 @@ function NativeSelect(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
   return (
     <select
       {...props}
-      className="flex h-10 w-full rounded-md border border-input bg-white px-3 py-2 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+      className="flex h-10 w-full rounded-lg border border-input bg-white px-3 py-2 text-sm outline-none transition-all focus-visible:border-blue-400 focus-visible:ring-2 focus-visible:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
     />
   );
 }
@@ -1535,8 +1542,8 @@ function OrdersSection({
         {visits.length ? visits.map((visit) => (
           <button
             key={visit.id}
-            className={`block w-full rounded-lg border p-4 text-left transition-colors ${
-              selected.id === visit.id ? "border-blue-600 bg-blue-50" : "border-border bg-white hover:bg-muted"
+            className={`block w-full rounded-xl border p-4 text-left transition-all ${
+              selected.id === visit.id ? "border-blue-500 bg-blue-50/70 shadow-md shadow-blue-100" : "border-border/60 bg-white shadow-sm hover:border-blue-200 hover:shadow-md"
             }`}
             onClick={() => onSelect(visit.id)}
           >
@@ -1813,18 +1820,18 @@ function SettingsSection({
 
 function DataTable({ headers, rows }: { headers: string[]; rows: string[][] }) {
   return (
-    <Card>
+    <Card className="overflow-hidden border-border/60 shadow-sm">
       <CardContent className="overflow-x-auto p-0">
         <table className="w-full min-w-[720px] border-collapse text-sm">
           <thead>
-            <tr className="border-b border-border bg-muted text-left text-muted-foreground">
-              {headers.map((header) => <th key={header} className="px-4 py-3 font-medium">{header}</th>)}
+            <tr className="border-b border-border/60 text-left">
+              {headers.map((header) => <th key={header} className="px-5 py-3 text-xs font-medium uppercase tracking-wider text-muted-foreground">{header}</th>)}
             </tr>
           </thead>
           <tbody>
             {rows.map((row, rowIndex) => (
-              <tr key={rowIndex} className="border-b border-border last:border-b-0">
-                {row.map((cell, cellIndex) => <td key={`${rowIndex}-${cellIndex}`} className="px-4 py-3">{cell}</td>)}
+              <tr key={rowIndex} className="border-b border-border/40 transition-colors last:border-b-0 hover:bg-slate-50/50">
+                {row.map((cell, cellIndex) => <td key={`${rowIndex}-${cellIndex}`} className="px-5 py-3.5">{cell}</td>)}
               </tr>
             ))}
           </tbody>
