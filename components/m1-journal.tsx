@@ -6,11 +6,13 @@ import {
   ClipboardList,
   CreditCard,
   FileText,
+  Pencil,
   Plus,
   Printer,
   RefreshCw,
   Search,
   Settings,
+  Trash2,
   Users
 } from "lucide-react";
 import Link from "next/link";
@@ -121,15 +123,26 @@ const paymentMethods: PaymentMethod[] = ["Не оплачено", "Наличн�
 const statuses: VisitStatus[] = ["Запланирован", "В работе", "Завершён", "Оплачен"];
 const storageKey = "m1-autoservice-mvp-v2";
 
-const today = new Date();
 const dayMs = 24 * 60 * 60 * 1000;
 
 function isoDate(date: Date) {
   return date.toISOString().slice(0, 10);
 }
 
+function todayDate() {
+  return new Date();
+}
+
+function todayIsoDate() {
+  return isoDate(todayDate());
+}
+
+function addDaysFrom(base: Date, days: number) {
+  return isoDate(new Date(base.getTime() + days * dayMs));
+}
+
 function addDays(days: number) {
-  return isoDate(new Date(today.getTime() + days * dayMs));
+  return addDaysFrom(todayDate(), days);
 }
 
 function currentTime() {
@@ -155,6 +168,15 @@ function formatMoney(value: number) {
 
 function sum(list: number[]) {
   return list.reduce((total, item) => total + item, 0);
+}
+
+// Русское склонение окончания для слова "визит": 1 визит, 2 визита, 5 визитов.
+function plural(count: number) {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return "";
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return "а";
+  return "ов";
 }
 
 function visitTotal(visit: Visit) {
@@ -183,7 +205,7 @@ function nextAppointmentId(appointments: Appointment[]) {
   return `a-${next}`;
 }
 
-function statusForPayment(paymentMethod: PaymentMethod, current: VisitStatus) {
+function statusForPayment(paymentMethod: PaymentMethod, current: VisitStatus): VisitStatus {
   if (paymentMethod !== "Не оплачено") return "Оплачен";
   return current === "Оплачен" ? "Завершён" : current;
 }
@@ -209,7 +231,7 @@ function parseItems(text: string, fallbackAmount: number): WorkItem[] {
   }));
 }
 
-function createEmptyForm(): VisitForm {
+function createEmptyForm(mechanics?: Mechanic[]): VisitForm {
   return {
     time: currentTime(),
     client: "",
@@ -218,11 +240,11 @@ function createEmptyForm(): VisitForm {
     plate: "",
     mileage: "",
     vin: "",
-    worksText: "Замена масла",
-    mechanic: "Аркаша",
-    laborAmount: "2500",
+    worksText: "",
+    mechanic: mechanics?.[0]?.name ?? "",
+    laborAmount: "",
     partsText: "",
-    partsAmount: "0",
+    partsAmount: "",
     paymentMethod: "Не оплачено",
     status: "В работе",
     comment: ""
@@ -237,7 +259,7 @@ function createEmptyAppointmentForm(): AppointmentForm {
     phone: "",
     car: "",
     plate: "",
-    plannedService: "Замена масла",
+    plannedService: "",
     comment: ""
   };
 }
@@ -401,38 +423,42 @@ type SectionId = (typeof nav)[number]["id"];
 
 export default function M1Journal({ section = "today", initialOrderId }: { section?: SectionId; initialOrderId?: string }) {
   const router = useRouter();
-  const [state, setState] = useState<AppState>(mockState);
-  const [formOpen, setFormOpen] = useState(false);
-  const [detailVisit, setDetailVisit] = useState<Visit | null>(null);
-  const [paymentVisit, setPaymentVisit] = useState<Visit | null>(null);
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("Наличные");
-  const [selectedOrderId, setSelectedOrderId] = useState(initialOrderId ?? mockState.visits[0].id);
-  const [clientSearch, setClientSearch] = useState("");
-  const [form, setForm] = useState<VisitForm>(() => createEmptyForm());
-  const [formError, setFormError] = useState("");
-  const [notice, setNotice] = useState("");
-
-  useEffect(() => {
+  const [state, setState] = useState<AppState>(() => {
+    if (typeof window === "undefined") return mockState;
     const saved = window.localStorage.getItem(storageKey);
     if (saved) {
       try {
-        setState(JSON.parse(saved) as AppState);
+        return JSON.parse(saved) as AppState;
       } catch {
         window.localStorage.removeItem(storageKey);
       }
     }
-  }, []);
+    return mockState;
+  });
+  const [formOpen, setFormOpen] = useState(false);
+  const [detailVisit, setDetailVisit] = useState<Visit | null>(null);
+  const [paymentVisit, setPaymentVisit] = useState<Visit | null>(null);
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("Наличные");
+  const [selectedOrderId, setSelectedOrderId] = useState(() => initialOrderId ?? state.visits[0]?.id ?? "");
+  const [clientSearch, setClientSearch] = useState("");
+  const [form, setForm] = useState<VisitForm>(() => createEmptyForm(state.mechanics));
+  const [formError, setFormError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [editingVisit, setEditingVisit] = useState<Visit | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [acceptingId, setAcceptingId] = useState<string | null>(null);
+  const [editingAppointment, setEditingAppointment] = useState<Appointment | null>(null);
 
   useEffect(() => {
     window.localStorage.setItem(storageKey, JSON.stringify(state));
   }, [state]);
 
-  const todayIso = isoDate(today);
+  const todayIso = todayIsoDate();
   const todayVisits = useMemo(() => state.visits.filter((visit) => visit.date === todayIso), [state.visits, todayIso]);
   const selectedOrder = state.visits.find((visit) => visit.id === selectedOrderId) ?? todayVisits[0] ?? state.visits[0];
 
   const dayTotals = useMemo(() => buildDayTotals(todayVisits, state.mechanics), [todayVisits, state.mechanics]);
-  const clientCards = useMemo(() => buildClients(state.visits), [state.visits]);
+  const clientCards = useMemo(() => buildClients(state.visits, state.appointments, todayIso), [state.visits, state.appointments, todayIso]);
   const filteredClients = clientCards.filter((client) => {
     const query = clientSearch.trim().toLowerCase();
     if (!query) return true;
@@ -466,7 +492,29 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
     setPaymentVisit(null);
   }
 
-  function addVisit() {
+  function startEditVisit(visit: Visit) {
+    setEditingVisit(visit);
+    setForm({
+      time: visit.time,
+      client: visit.client,
+      phone: visit.phone,
+      car: visit.car,
+      plate: visit.plate,
+      mileage: visit.mileage,
+      vin: visit.vin,
+      worksText: visit.works.map((w) => w.name).join(", "),
+      mechanic: visit.mechanic,
+      laborAmount: String(visit.laborAmount),
+      partsText: visit.parts.map((p) => p.name).join(", "),
+      partsAmount: String(visit.partsAmount),
+      paymentMethod: visit.paymentMethod,
+      status: visit.status,
+      comment: visit.comment
+    });
+    setFormOpen(true);
+  }
+
+  function saveVisit() {
     if (!form.car.trim() || !form.worksText.trim() || !form.mechanic.trim() || Number(form.laborAmount) <= 0) {
       setFormError("Заполните автомобиль, работу, механика и сумму работ.");
       return;
@@ -474,9 +522,7 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
 
     const laborAmount = Number(form.laborAmount) || 0;
     const partsAmount = Number(form.partsAmount) || 0;
-    const visit: Visit = {
-      id: nextVisitId(state.visits),
-      date: todayIso,
+    const visitData = {
       time: form.time || currentTime(),
       client: form.client.trim(),
       phone: form.phone.trim(),
@@ -494,12 +540,51 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
       comment: form.comment.trim()
     };
 
-    setState((current) => ({ ...current, visits: [visit, ...current.visits] }));
-    setSelectedOrderId(visit.id);
-    setForm(createEmptyForm());
+    if (editingVisit) {
+      updateVisit(editingVisit.id, visitData);
+      showNotice(`Заезд обновлён: ${visitData.car}`);
+    } else {
+      const visit: Visit = {
+        id: nextVisitId(state.visits),
+        date: todayIso,
+        ...visitData
+      };
+      setState((current) => ({
+        ...current,
+        visits: [visit, ...current.visits],
+        // если заезд создан из записи — помечаем запись принятой
+        appointments: acceptingId
+          ? current.appointments.map((item) => item.id === acceptingId ? { ...item, state: "accepted" } : item)
+          : current.appointments
+      }));
+      setSelectedOrderId(visit.id);
+      if (acceptingId) {
+        showNotice(`Запись принята в работу: ${visit.car}`);
+        router.push("/");
+      } else {
+        showNotice(`Заезд добавлен: ${visit.car}`);
+      }
+    }
+
+    setEditingVisit(null);
+    setAcceptingId(null);
+    setForm(createEmptyForm(state.mechanics));
     setFormError("");
     setFormOpen(false);
-    showNotice(`Заезд добавлен: ${visit.car}`);
+  }
+
+  function deleteVisit(id: string) {
+    const visit = state.visits.find((v) => v.id === id);
+    setState((current) => ({
+      ...current,
+      visits: current.visits.filter((v) => v.id !== id)
+    }));
+    setDeleteConfirm(null);
+    if (visit) showNotice(`Заезд удалён: ${visit.car}`);
+  }
+
+  function changeVisitStatus(id: string, status: VisitStatus) {
+    updateVisit(id, { status });
   }
 
   function addAppointment(form: AppointmentForm) {
@@ -523,10 +608,12 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
     showNotice(`Запись добавлена: ${appointment.car}`);
   }
 
+  // Принять запись = открыть форму заезда, заранее заполненную данными из записи.
+  // Сумму работ и мастера вносит приёмщик. Запись помечается «принята» после сохранения.
   function acceptAppointment(appointment: Appointment) {
-    const visit: Visit = {
-      id: nextVisitId(state.visits),
-      date: todayIso,
+    setEditingVisit(null);
+    setAcceptingId(appointment.id);
+    setForm({
       time: appointment.time || currentTime(),
       client: appointment.client,
       phone: appointment.phone,
@@ -534,36 +621,28 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
       plate: appointment.plate,
       mileage: "",
       vin: "",
-      works: [{ name: appointment.plannedService, amount: 0 }],
-      mechanic: state.mechanics[0]?.name ?? "Аркаша",
-      laborAmount: 0,
-      parts: [],
-      partsAmount: 0,
+      worksText: appointment.plannedService,
+      mechanic: state.mechanics[0]?.name ?? "",
+      laborAmount: "",
+      partsText: "",
+      partsAmount: "",
       paymentMethod: "Не оплачено",
       status: "В работе",
       comment: appointment.comment
-    };
-
-    setState((current) => ({
-      ...current,
-      visits: [visit, ...current.visits],
-      appointments: current.appointments.map((item) =>
-        item.id === appointment.id ? { ...item, state: "accepted" } : item
-      )
-    }));
-    setSelectedOrderId(visit.id);
-    router.push("/");
-    showNotice(`Запись принята в работу: ${appointment.car}`);
+    });
+    setFormError("");
+    setFormOpen(true);
   }
 
   function moveAppointment(appointment: Appointment) {
+    const nextDay = addDaysFrom(new Date(`${appointment.date}T12:00:00`), 1);
     setState((current) => ({
       ...current,
       appointments: current.appointments.map((item) =>
-        item.id === appointment.id ? { ...item, date: addDays(1) } : item
+        item.id === appointment.id ? { ...item, date: nextDay } : item
       )
     }));
-    showNotice("Запись перенесена на завтра");
+    showNotice(`Запись перенесена на ${formatDate(nextDay)}`);
   }
 
   function cancelAppointment(appointment: Appointment) {
@@ -576,6 +655,51 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
     showNotice("Запись отменена");
   }
 
+  function restoreAppointment(appointment: Appointment) {
+    setState((current) => ({
+      ...current,
+      appointments: current.appointments.map((item) =>
+        item.id === appointment.id ? { ...item, state: "active" } : item
+      )
+    }));
+    showNotice("Запись возвращена в активные");
+  }
+
+  function deleteAppointment(id: string) {
+    setState((current) => ({
+      ...current,
+      appointments: current.appointments.filter((item) => item.id !== id)
+    }));
+    showNotice("Запись удалена");
+  }
+
+  function saveAppointment(formData: AppointmentForm) {
+    if (editingAppointment) {
+      setState((current) => ({
+        ...current,
+        appointments: current.appointments.map((item) =>
+          item.id === editingAppointment.id
+            ? {
+                ...item,
+                date: formData.date,
+                time: formData.time || currentTime(),
+                client: formData.client.trim(),
+                phone: formData.phone.trim(),
+                car: formData.car.trim(),
+                plate: formData.plate.trim().toUpperCase(),
+                plannedService: formData.plannedService.trim(),
+                comment: formData.comment.trim()
+              }
+            : item
+        )
+      }));
+      setEditingAppointment(null);
+      showNotice(`Запись обновлена: ${formData.car}`);
+    } else {
+      addAppointment(formData);
+    }
+  }
+
   function resetDemo() {
     window.localStorage.removeItem(storageKey);
     setState(mockState);
@@ -584,80 +708,98 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
   }
 
   return (
-    <main className="min-h-screen bg-[#f6f8fb]">
-      <div className="no-print sticky top-0 z-40 border-b border-border bg-white/95 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl flex-col gap-3 px-4 py-3 sm:px-6">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div className="min-w-0">
-              <p className="text-sm font-semibold text-blue-700">М1 / Mobil 1 Центр</p>
-              <h1 className="mt-0.5 text-xl font-semibold tracking-normal text-foreground sm:text-2xl">Ежедневный журнал</h1>
+    <main className="flex min-h-screen bg-[hsl(var(--background))]">
+      <aside className="no-print fixed inset-y-0 left-0 z-50 flex w-[220px] flex-col border-r border-slate-800 bg-[hsl(var(--sidebar))]">
+        <div className="flex h-16 items-center gap-3 border-b border-slate-800 px-5">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-600 text-sm font-bold text-white">M1</div>
+          <div className="min-w-0">
+            <p className="truncate text-sm font-semibold text-white">Mobil 1 Центр</p>
+            <p className="truncate text-xs text-slate-400">Журнал</p>
+          </div>
+        </div>
+        <nav className="flex-1 space-y-1 px-3 py-4">
+          {nav.map((item) => {
+            const Icon = item.icon;
+            const active = section === item.id;
+            return (
+              <Link
+                key={item.id}
+                href={item.href}
+                className={`flex h-10 items-center gap-3 rounded-lg px-3 text-sm font-medium transition-all ${
+                  active
+                    ? "bg-blue-600 text-white shadow-lg shadow-blue-600/25"
+                    : "text-slate-400 hover:bg-[hsl(var(--sidebar-hover))] hover:text-white"
+                }`}
+              >
+                <Icon className="h-[18px] w-[18px] shrink-0" />
+                <span>{item.label}</span>
+              </Link>
+            );
+          })}
+        </nav>
+        <div className="border-t border-slate-800 p-3">
+          <Button variant="secondary" size="sm" onClick={resetDemo} className="w-full justify-center gap-2 border-slate-700 bg-transparent text-slate-400 hover:bg-slate-800 hover:text-white">
+            <RefreshCw className="h-3.5 w-3.5" />
+            Сбросить демо
+          </Button>
+        </div>
+      </aside>
+
+      <div className="flex-1 pl-[220px]">
+        <header className="no-print sticky top-0 z-40 border-b border-border bg-white/80 backdrop-blur-xl">
+          <div className="flex h-16 items-center justify-between px-8">
+            <div>
+              <h1 className="text-lg font-semibold text-foreground">{nav.find((item) => item.id === section)?.label ?? "Сегодня"}</h1>
+              <p className="text-xs text-muted-foreground">{formatDate(todayIso)}</p>
             </div>
-            <div className="flex flex-wrap gap-2">
-              <Button variant="secondary" onClick={resetDemo}>
-                <RefreshCw className="h-4 w-4" />
-                Сбросить демо
+            <div className="flex items-center gap-3">
+              <Button className="gap-2 rounded-lg bg-blue-600 shadow-md shadow-blue-600/25 hover:bg-blue-700" onClick={() => {
+                setEditingVisit(null);
+                setAcceptingId(null);
+                setForm(createEmptyForm(state.mechanics));
+                setFormOpen(true);
+              }}>
+                <Plus className="h-4 w-4" />
+                Новый заезд
               </Button>
               <Dialog open={formOpen} onOpenChange={(open) => {
-                setFormOpen(open);
-                if (open) setForm((current) => ({ ...current, time: current.time || currentTime() }));
-                if (!open) setFormError("");
+                if (!open) {
+                  setFormOpen(false);
+                  setEditingVisit(null);
+                  setAcceptingId(null);
+                  setFormError("");
+                }
               }}>
-            <DialogTrigger asChild>
-              <Button>
-                <Plus className="h-4 w-4" />
-                Добавить заезд
-              </Button>
-            </DialogTrigger>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>Новый заезд</DialogTitle>
-              </DialogHeader>
-              <VisitFormView
-                form={form}
-                error={formError}
-                mechanics={state.mechanics}
-                services={state.services}
-                onChange={(nextForm) => {
-                  setForm(nextForm);
-                  if (formError) setFormError("");
-                }}
-                onSubmit={addVisit}
-              />
-            </DialogContent>
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>{editingVisit ? "Редактировать заезд" : acceptingId ? "Приём записи в работу" : "Новый заезд"}</DialogTitle>
+                  </DialogHeader>
+                  <VisitFormView
+                    form={form}
+                    error={formError}
+                    mechanics={state.mechanics}
+                    services={state.services}
+                    onChange={(nextForm) => {
+                      setForm(nextForm);
+                      if (formError) setFormError("");
+                    }}
+                    onSubmit={saveVisit}
+                  />
+                </DialogContent>
               </Dialog>
             </div>
           </div>
-          <nav className="flex gap-1 overflow-x-auto pb-1">
-            {nav.map((item) => {
-              const Icon = item.icon;
-              const active = section === item.id;
-              return (
-                <Link
-                  key={item.id}
-                  href={item.href}
-                  className={`flex h-9 shrink-0 items-center gap-2 rounded-md px-3 text-sm font-medium transition-colors ${
-                    active
-                      ? "bg-blue-600 text-white shadow-sm"
-                      : "text-slate-700 hover:bg-slate-100"
-                  }`}
-                >
-                  <Icon className="h-4 w-4 shrink-0" />
-                  <span>{item.label}</span>
-                </Link>
-              );
-            })}
-          </nav>
-        </div>
-      </div>
+        </header>
 
-      {notice && (
-        <div className="no-print fixed right-4 top-24 z-50 rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm font-medium text-green-800 shadow-sm">
-          {notice}
-        </div>
-      )}
+        {notice && (
+          <div className="no-print fixed right-6 top-20 z-50 flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm font-medium text-green-700 shadow-lg shadow-green-100">
+            <CheckCircle2 className="h-4 w-4 shrink-0" />
+            {notice}
+          </div>
+        )}
 
-      <div className="no-print mx-auto max-w-7xl px-4 py-5 sm:px-6">
-        <section className="min-w-0">
+        <div className="no-print px-8 py-6">
+          <section className="min-w-0">
           {section === "today" && (
             <TodaySection
               date={todayIso}
@@ -669,6 +811,12 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
                 router.push(`/orders?order=${encodeURIComponent(visit.id)}`);
               }}
               onPaid={markPaid}
+              onEdit={startEditVisit}
+              onDelete={(id) => setDeleteConfirm(id)}
+              onStatusChange={changeVisitStatus}
+              deleteConfirm={deleteConfirm}
+              onDeleteConfirm={deleteVisit}
+              onDeleteCancel={() => setDeleteConfirm(null)}
             />
           )}
 
@@ -676,10 +824,16 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
             <AppointmentsSection
               appointments={state.appointments}
               services={state.services}
-              onAdd={addAppointment}
+              todayIso={todayIso}
+              editingAppointment={editingAppointment}
+              onSave={saveAppointment}
               onAccept={acceptAppointment}
               onMove={moveAppointment}
               onCancel={cancelAppointment}
+              onRestore={restoreAppointment}
+              onEdit={setEditingAppointment}
+              onEditCancel={() => setEditingAppointment(null)}
+              onDelete={deleteAppointment}
             />
           )}
 
@@ -704,7 +858,7 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
           )}
 
           {section === "summary" && (
-            <DaySummarySection date={todayIso} totals={dayTotals} mechanics={state.mechanics} />
+            <DaySummarySection visits={state.visits} mechanics={state.mechanics} todayIso={todayIso} />
           )}
 
           {section === "stats" && <StatsSection visits={state.visits} mechanics={state.mechanics} />}
@@ -713,6 +867,7 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
             <SettingsSection state={state} setState={setState} />
           )}
         </section>
+        </div>
       </div>
 
       <Dialog open={Boolean(detailVisit)} onOpenChange={(open) => !open && setDetailVisit(null)}>
@@ -763,9 +918,14 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
   );
 }
 
+function mechanicPercent(mechanics: Mechanic[], name: string) {
+  return mechanics.find((mechanic) => mechanic.name === name)?.percent ?? 0;
+}
+
 function buildDayTotals(visits: Visit[], mechanics: Mechanic[]) {
   const total = sum(visits.map(visitTotal));
-  const paid = sum(visits.filter(isPaid).map(visitTotal));
+  const paidVisits = visits.filter(isPaid);
+  const paid = sum(paidVisits.map(visitTotal));
   const unpaid = total - paid;
   const parts = sum(visits.map((visit) => visit.partsAmount));
   const byPayment = Object.fromEntries(paymentMethods.map((method) => [method, 0])) as Record<PaymentMethod, number>;
@@ -774,21 +934,27 @@ function buildDayTotals(visits: Visit[], mechanics: Mechanic[]) {
     byPayment[isPaid(visit) ? visit.paymentMethod : "Не оплачено"] += visitTotal(visit);
   });
 
+  // «Чистыми» считаем только по фактически полученным деньгам (оплаченные заезды):
+  // оплачено − стоимость запчастей по оплаченным − зарплата мастеров с оплаченных работ.
+  const paidParts = sum(paidVisits.map((visit) => visit.partsAmount));
+  const paidMechanicAccrued = sum(paidVisits.map((visit) =>
+    Math.round((visit.laborAmount * mechanicPercent(mechanics, visit.mechanic)) / 100)
+  ));
+
+  // Сводка по мастерам — только за этот день (начислено за день).
   const mechanicRows = mechanics.map((mechanic) => {
     const mechanicVisits = visits.filter((visit) => visit.mechanic === mechanic.name);
     const labor = sum(mechanicVisits.map((visit) => visit.laborAmount));
-    const works = sum(mechanicVisits.map((visit) => Math.max(visit.works.length, 1)));
+    const works = mechanicVisits.length;
     const accrued = Math.round((labor * mechanic.percent) / 100);
     return {
       mechanic: mechanic.name,
       works,
       labor,
       percent: mechanic.percent,
-      accrued,
-      paid: mechanic.paid,
-      balance: accrued - mechanic.paid
+      accrued
     };
-  });
+  }).filter((row) => row.works > 0);
   const mechanicAccrued = sum(mechanicRows.map((row) => row.accrued));
 
   return {
@@ -799,49 +965,103 @@ function buildDayTotals(visits: Visit[], mechanics: Mechanic[]) {
     parts,
     byPayment,
     mechanicAccrued,
-    clean: paid - parts - mechanicAccrued,
+    clean: paid - paidParts - paidMechanicAccrued,
     mechanicRows
   };
 }
 
-function buildClients(visits: Visit[]) {
-  const map = new Map<string, {
-    name: string;
-    phone: string;
-    cars: string[];
-    visits: Visit[];
-    total: number;
-    lastVisit: string;
-  }>();
+// Расчёт с мастерами за всё время: начислено по всем заездам минус уже выданное.
+function buildMechanicSettlement(visits: Visit[], mechanics: Mechanic[]) {
+  return mechanics.map((mechanic) => {
+    const mechanicVisits = visits.filter((visit) => visit.mechanic === mechanic.name);
+    const labor = sum(mechanicVisits.map((visit) => visit.laborAmount));
+    const accrued = Math.round((labor * mechanic.percent) / 100);
+    return {
+      id: mechanic.id,
+      mechanic: mechanic.name,
+      works: mechanicVisits.length,
+      labor,
+      percent: mechanic.percent,
+      accrued,
+      paid: mechanic.paid,
+      balance: accrued - mechanic.paid
+    };
+  });
+}
+
+// Нормализуем телефон до цифр, чтобы "+7 923 111-22-33" и "89231112233" были одним клиентом.
+function normalizePhone(phone: string) {
+  const digits = phone.replace(/\D/g, "");
+  // приводим 8XXX и 7XXX к единому виду
+  if (digits.length === 11 && (digits[0] === "8" || digits[0] === "7")) return `7${digits.slice(1)}`;
+  return digits;
+}
+
+type ClientCard = {
+  name: string;
+  phone: string;
+  cars: string[];
+  visits: Visit[];
+  upcoming: Appointment[];
+  total: number;
+  paid: number;
+  lastVisit: string;
+};
+
+function buildClients(visits: Visit[], appointments: Appointment[], todayIso: string): ClientCard[] {
+  const map = new Map<string, ClientCard>();
+
+  // Ключ клиента: нормализованный телефон, иначе — имя в нижнем регистре, иначе госномер.
+  const clientKey = (name: string, phone: string, plate: string) => {
+    const normalized = normalizePhone(phone);
+    if (normalized) return `tel:${normalized}`;
+    if (name.trim()) return `name:${name.trim().toLowerCase()}`;
+    return `car:${plate || "—"}`;
+  };
+
+  const ensure = (name: string, phone: string, plate: string): ClientCard => {
+    const key = clientKey(name, phone, plate);
+    const existing = map.get(key);
+    if (existing) {
+      // дополняем недостающие имя/телефон, если в одном из заездов они были пустыми
+      if (!existing.name && name) existing.name = name;
+      if (!existing.phone && phone) existing.phone = phone;
+      return existing;
+    }
+    const card: ClientCard = { name, phone, cars: [], visits: [], upcoming: [], total: 0, paid: 0, lastVisit: "" };
+    map.set(key, card);
+    return card;
+  };
 
   visits.forEach((visit) => {
     const name = visit.client || "Клиент без имени";
-    const key = `${name}-${visit.phone}-${visit.plate || visit.car}`;
-    const current = map.get(key) ?? {
-      name,
-      phone: visit.phone,
-      cars: [],
-      visits: [],
-      total: 0,
-      lastVisit: visit.date
-    };
+    const card = ensure(name, visit.phone, visit.plate);
     const carTitle = `${visit.car}${visit.plate ? `, ${visit.plate}` : ""}`;
-    if (!current.cars.includes(carTitle)) current.cars.push(carTitle);
-    current.visits.push(visit);
-    current.total += visitTotal(visit);
-    current.lastVisit = current.lastVisit > visit.date ? current.lastVisit : visit.date;
-    map.set(key, current);
+    if (carTitle.trim() && !card.cars.includes(carTitle)) card.cars.push(carTitle);
+    card.visits.push(visit);
+    card.total += visitTotal(visit);
+    if (isPaid(visit)) card.paid += visitTotal(visit);
+    if (visit.date > card.lastVisit) card.lastVisit = visit.date;
   });
+
+  // Привязываем предстоящие активные записи к существующим клиентам (без создания новых карточек).
+  appointments
+    .filter((appointment) => appointment.state === "active" && appointment.date >= todayIso)
+    .forEach((appointment) => {
+      const key = clientKey(appointment.client || "", appointment.phone, appointment.plate);
+      const card = map.get(key);
+      if (card) card.upcoming.push(appointment);
+    });
 
   return Array.from(map.values()).sort((a, b) => b.lastVisit.localeCompare(a.lastVisit));
 }
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
   return (
-    <Card className="shadow-none">
-      <CardContent className="p-4">
-        <p className="text-sm text-muted-foreground">{label}</p>
-        <p className="mt-2 text-xl font-semibold tracking-normal">{value}</p>
+    <Card className="border-border/60 shadow-sm transition-shadow hover:shadow-md">
+      <CardContent className="p-5">
+        <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">{label}</p>
+        <p className="mt-2 text-xl font-semibold tracking-tight text-foreground">{value}</p>
       </CardContent>
     </Card>
   );
@@ -849,7 +1069,7 @@ function StatCard({ label, value }: { label: string; value: string | number }) {
 
 function EmptyState({ title, text }: { title: string; text: string }) {
   return (
-    <div className="rounded-lg border border-dashed border-border bg-white p-6 text-center sm:col-span-2 xl:col-span-full">
+    <div className="rounded-xl border border-dashed border-border/60 bg-white/50 p-8 text-center sm:col-span-2 xl:col-span-full">
       <p className="font-semibold">{title}</p>
       <p className="mt-1 text-sm text-muted-foreground">{text}</p>
     </div>
@@ -862,7 +1082,13 @@ function TodaySection({
   totals,
   onOpen,
   onOrder,
-  onPaid
+  onPaid,
+  onEdit,
+  onDelete,
+  onStatusChange,
+  deleteConfirm,
+  onDeleteConfirm,
+  onDeleteCancel
 }: {
   date: string;
   visits: Visit[];
@@ -870,28 +1096,32 @@ function TodaySection({
   onOpen: (visit: Visit) => void;
   onOrder: (visit: Visit) => void;
   onPaid: (visit: Visit) => void;
+  onEdit: (visit: Visit) => void;
+  onDelete: (id: string) => void;
+  onStatusChange: (id: string, status: VisitStatus) => void;
+  deleteConfirm: string | null;
+  onDeleteConfirm: (id: string) => void;
+  onDeleteCancel: () => void;
 }) {
   const sortedVisits = [...visits].sort((a, b) => (a.time || "99:99").localeCompare(b.time || "99:99"));
 
   return (
-    <div className="space-y-5">
-      <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-normal">Сегодня</h2>
-          <p className="text-sm text-muted-foreground">{formatDate(date)}</p>
-        </div>
-      </div>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8">
-        <StatCard label="Заезды сегодня" value={totals.visits} />
+    <div className="space-y-6">
+      <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
+        <StatCard label="Заезды" value={totals.visits} />
         <StatCard label="Выручка" value={formatMoney(totals.total)} />
-        <StatCard label="Наличные" value={formatMoney(totals.byPayment["Наличные"])} />
-        <StatCard label="Перевод" value={formatMoney(totals.byPayment["Перевод"])} />
-        <StatCard label="Терминал" value={formatMoney(totals.byPayment["Терминал"])} />
-        <StatCard label="Безнал" value={formatMoney(totals.byPayment["Безнал"])} />
         <StatCard label="Не оплачено" value={formatMoney(totals.unpaid)} />
         <StatCard label="Чистыми" value={formatMoney(totals.clean)} />
       </div>
-      <div className="overflow-hidden rounded-lg border border-border bg-white lg:overflow-x-auto">
+      {totals.visits > 0 && (
+        <div className="flex flex-wrap gap-4 rounded-lg border border-border/40 bg-white/60 px-4 py-2.5 text-xs text-muted-foreground">
+          <span>Наличные: <b className="text-foreground">{formatMoney(totals.byPayment["Наличные"])}</b></span>
+          <span>Перевод: <b className="text-foreground">{formatMoney(totals.byPayment["Перевод"])}</b></span>
+          <span>Терминал: <b className="text-foreground">{formatMoney(totals.byPayment["Терминал"])}</b></span>
+          <span>Безнал: <b className="text-foreground">{formatMoney(totals.byPayment["Безнал"])}</b></span>
+        </div>
+      )}
+      <div className="overflow-hidden rounded-xl border border-border/60 bg-white shadow-sm lg:overflow-x-auto">
         {sortedVisits.length ? sortedVisits.map((visit, index) => (
           <VisitRow
             key={visit.id}
@@ -900,12 +1130,17 @@ function TodaySection({
             onOpen={onOpen}
             onOrder={onOrder}
             onPaid={onPaid}
+            onEdit={onEdit}
+            onDelete={onDelete}
+            onStatusChange={onStatusChange}
+            deleteConfirm={deleteConfirm}
+            onDeleteConfirm={onDeleteConfirm}
+            onDeleteCancel={onDeleteCancel}
           />
         )) : (
           <EmptyState title="Заездов сегодня пока нет" text="Добавьте первый заезд через кнопку в верхней панели." />
         )}
       </div>
-      <MechanicTotalsTable rows={totals.mechanicRows} />
     </div>
   );
 }
@@ -915,18 +1150,32 @@ function VisitRow({
   visit,
   onOpen,
   onOrder,
-  onPaid
+  onPaid,
+  onEdit,
+  onDelete,
+  onStatusChange,
+  deleteConfirm,
+  onDeleteConfirm,
+  onDeleteCancel
 }: {
   index: number;
   visit: Visit;
   onOpen: (visit: Visit) => void;
   onOrder: (visit: Visit) => void;
   onPaid: (visit: Visit) => void;
+  onEdit: (visit: Visit) => void;
+  onDelete: (id: string) => void;
+  onStatusChange: (id: string, status: VisitStatus) => void;
+  deleteConfirm: string | null;
+  onDeleteConfirm: (id: string) => void;
+  onDeleteCancel: () => void;
 }) {
+  const isDeleting = deleteConfirm === visit.id;
+
   return (
     <>
       {index === 0 && (
-        <div className="hidden min-w-[1180px] grid-cols-[44px_70px_1.25fr_1.25fr_1.4fr_92px_96px_96px_96px_100px_110px_220px] gap-3 border-b border-border bg-slate-50 px-3 py-3 text-xs font-semibold uppercase text-muted-foreground lg:grid">
+        <div className="hidden min-w-[960px] grid-cols-[36px_56px_1fr_1fr_1.2fr_80px_84px_84px_84px_88px_120px_200px] gap-3 border-b border-border/60 bg-slate-50/80 px-4 py-3 text-xs font-medium uppercase tracking-wider text-muted-foreground lg:grid">
           <span>№</span>
           <span>Время</span>
           <span>Авто / госномер</span>
@@ -941,7 +1190,7 @@ function VisitRow({
           <span className="text-right">Действия</span>
         </div>
       )}
-      <div className="hidden min-w-[1180px] grid-cols-[44px_70px_1.25fr_1.25fr_1.4fr_92px_96px_96px_96px_100px_110px_220px] gap-3 border-b border-border px-3 py-3 text-sm last:border-b-0 lg:grid lg:items-center">
+      <div className={`hidden min-w-[960px] grid-cols-[36px_56px_1fr_1fr_1.2fr_80px_84px_84px_84px_88px_120px_200px] gap-3 border-b border-border/40 px-4 py-3.5 text-sm transition-colors last:border-b-0 hover:bg-slate-50/50 lg:grid lg:items-center ${isDeleting ? "bg-red-50/50" : ""}`}>
         <span className="text-muted-foreground">{index + 1}</span>
         <span className="font-medium">{visit.time || "—"}</span>
         <div className="min-w-0">
@@ -958,13 +1207,35 @@ function VisitRow({
         <span className="text-right">{formatMoney(visit.partsAmount)}</span>
         <span className="text-right font-semibold">{formatMoney(visitTotal(visit))}</span>
         <span>{visit.paymentMethod}</span>
-        <Badge className={statusClass(visit.status)}>{visit.status}</Badge>
-        <div className="flex flex-wrap justify-end gap-2">
-          <Button variant="secondary" size="sm" onClick={() => onOpen(visit)}>Открыть</Button>
-          <Button variant="secondary" size="sm" onClick={() => onOrder(visit)}>ЗН</Button>
-          <Button size="sm" onClick={() => onPaid(visit)}>
-            {isPaid(visit) ? "Оплата" : "Оплатить"}
-          </Button>
+        <NativeSelect
+          value={visit.status}
+          onChange={(e) => onStatusChange(visit.id, e.target.value as VisitStatus)}
+          className="!h-8 !rounded !px-2 !py-1 !text-xs"
+        >
+          {statuses.map((s) => <option key={s} value={s}>{s}</option>)}
+        </NativeSelect>
+        <div className="flex flex-wrap justify-end gap-1">
+          {isDeleting ? (
+            <>
+              <Button variant="secondary" size="sm" className="h-7 text-xs" onClick={onDeleteCancel}>Нет</Button>
+              <Button size="sm" className="h-7 bg-red-600 text-xs hover:bg-red-700" onClick={() => onDeleteConfirm(visit.id)}>Да, удалить</Button>
+            </>
+          ) : (
+            <>
+              <Button variant="secondary" size="sm" className="h-7 w-7 p-0" onClick={() => onEdit(visit)} title="Редактировать">
+                <Pencil className="h-3.5 w-3.5" />
+              </Button>
+              <Button variant="secondary" size="sm" className="h-7 w-7 p-0" onClick={() => onOrder(visit)} title="Заказ-наряд">
+                <FileText className="h-3.5 w-3.5" />
+              </Button>
+              <Button size="sm" className="h-7 px-2 text-xs" onClick={() => onPaid(visit)}>
+                {isPaid(visit) ? "Оплата" : "Оплатить"}
+              </Button>
+              <Button variant="secondary" size="sm" className="h-7 w-7 p-0 text-red-500 hover:bg-red-50 hover:text-red-600" onClick={() => onDelete(visit.id)} title="Удалить">
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            </>
+          )}
         </div>
       </div>
       <div className="space-y-3 border-b border-border p-3 last:border-b-0 lg:hidden">
@@ -990,56 +1261,23 @@ function VisitRow({
           <Info label="Оплата" value={visit.paymentMethod} />
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" size="sm" onClick={() => onOpen(visit)}>Открыть</Button>
+          <Button variant="secondary" size="sm" onClick={() => onEdit(visit)}>Редактировать</Button>
           <Button variant="secondary" size="sm" onClick={() => onOrder(visit)}>Заказ-наряд</Button>
           <Button size="sm" onClick={() => onPaid(visit)}>
             {isPaid(visit) ? "Изменить оплату" : "Оплатить"}
           </Button>
+          <Button variant="secondary" size="sm" className="text-red-500" onClick={() => onDelete(visit.id)}>Удалить</Button>
         </div>
       </div>
     </>
   );
 }
 
-function MechanicTotalsTable({ rows }: { rows: ReturnType<typeof buildDayTotals>["mechanicRows"] }) {
-  return (
-    <div className="overflow-hidden rounded-lg border border-border bg-white">
-      <div className="border-b border-border bg-slate-50 px-4 py-3">
-        <h3 className="font-semibold">Итог по мастерам</h3>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[760px] border-collapse text-sm">
-          <thead>
-            <tr className="border-b border-border bg-muted text-left text-muted-foreground">
-              {["Мастер", "Работ", "Сумма работ", "%", "Начислено", "Выдано", "Остаток"].map((header) => (
-                <th key={header} className="px-4 py-3 font-medium">{header}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.mechanic} className="border-b border-border last:border-b-0">
-                <td className="px-4 py-3 font-medium">{row.mechanic}</td>
-                <td className="px-4 py-3">{row.works}</td>
-                <td className="px-4 py-3">{formatMoney(row.labor)}</td>
-                <td className="px-4 py-3">{row.percent}%</td>
-                <td className="px-4 py-3">{formatMoney(row.accrued)}</td>
-                <td className="px-4 py-3">{formatMoney(row.paid)}</td>
-                <td className="px-4 py-3 font-semibold">{formatMoney(row.balance)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
 function statusClass(status: VisitStatus) {
-  if (status === "Оплачен") return "border-green-200 bg-green-50 text-green-700";
-  if (status === "Завершён") return "border-blue-200 bg-blue-50 text-blue-700";
-  if (status === "В работе") return "border-amber-200 bg-amber-50 text-amber-700";
-  return "";
+  if (status === "Оплачен") return "border-emerald-200 bg-emerald-50 text-emerald-700 font-medium";
+  if (status === "Завершён") return "border-blue-200 bg-blue-50 text-blue-700 font-medium";
+  if (status === "В работе") return "border-amber-200 bg-amber-50 text-amber-700 font-medium";
+  return "border-slate-200 bg-slate-50 text-slate-600 font-medium";
 }
 
 function VisitFormView({
@@ -1136,7 +1374,7 @@ function NativeSelect(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
   return (
     <select
       {...props}
-      className="flex h-10 w-full rounded-md border border-input bg-white px-3 py-2 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+      className="flex h-10 w-full rounded-lg border border-input bg-white px-3 py-2 text-sm outline-none transition-all focus-visible:border-blue-400 focus-visible:ring-2 focus-visible:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
     />
   );
 }
@@ -1174,27 +1412,84 @@ function Info({ label, value }: { label: string; value: string }) {
 function AppointmentsSection({
   appointments,
   services,
-  onAdd,
+  todayIso,
+  editingAppointment,
+  onSave,
   onAccept,
   onMove,
-  onCancel
+  onCancel,
+  onRestore,
+  onEdit,
+  onEditCancel,
+  onDelete
 }: {
   appointments: Appointment[];
   services: string[];
-  onAdd: (form: AppointmentForm) => void;
+  todayIso: string;
+  editingAppointment: Appointment | null;
+  onSave: (form: AppointmentForm) => void;
   onAccept: (appointment: Appointment) => void;
   onMove: (appointment: Appointment) => void;
   onCancel: (appointment: Appointment) => void;
+  onRestore: (appointment: Appointment) => void;
+  onEdit: (appointment: Appointment) => void;
+  onEditCancel: () => void;
+  onDelete: (id: string) => void;
 }) {
   const [formOpen, setFormOpen] = useState(false);
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [form, setForm] = useState<AppointmentForm>(() => createEmptyAppointmentForm());
   const [error, setError] = useState("");
+  const [tab, setTab] = useState("upcoming");
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+
+  // Открываем форму при запросе на редактирование извне.
+  useEffect(() => {
+    if (editingAppointment) {
+      setForm({
+        date: editingAppointment.date,
+        time: editingAppointment.time,
+        client: editingAppointment.client,
+        phone: editingAppointment.phone,
+        car: editingAppointment.car,
+        plate: editingAppointment.plate,
+        plannedService: editingAppointment.plannedService,
+        comment: editingAppointment.comment
+      });
+      setError("");
+      setFormOpen(true);
+    }
+  }, [editingAppointment]);
+
+  const active = appointments.filter((item) => item.state === "active");
+  const overdue = active.filter((item) => item.date < todayIso);
+  const tomorrowIso = addDaysFrom(new Date(`${todayIso}T12:00:00`), 1);
+
+  const groups = {
+    upcoming: active.filter((item) => item.date >= todayIso),
+    today: active.filter((item) => item.date === todayIso),
+    tomorrow: active.filter((item) => item.date === tomorrowIso),
+    archive: appointments.filter((item) => item.state !== "active")
+  };
+
   const tabs = [
-    { id: "today", label: "Сегодня", filter: (item: Appointment) => item.date === addDays(0) },
-    { id: "tomorrow", label: "Завтра", filter: (item: Appointment) => item.date === addDays(1) },
-    { id: "week", label: "Неделя", filter: (item: Appointment) => item.date >= addDays(0) && item.date <= addDays(7) }
+    { id: "upcoming", label: "Предстоящие", count: groups.upcoming.length },
+    { id: "today", label: "Сегодня", count: groups.today.length },
+    { id: "tomorrow", label: "Завтра", count: groups.tomorrow.length },
+    { id: "archive", label: "Архив", count: groups.archive.length }
   ];
+
+  const sortByDate = (list: Appointment[]) =>
+    [...list].sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
+
+  const visible = sortByDate(groups[tab as keyof typeof groups]);
+
+  function closeForm() {
+    setFormOpen(false);
+    setError("");
+    onEditCancel();
+    setForm(createEmptyAppointmentForm());
+  }
 
   function submitAppointment() {
     if (!form.date || !form.time || !form.car.trim() || !form.plannedService.trim()) {
@@ -1202,7 +1497,7 @@ function AppointmentsSection({
       return;
     }
 
-    onAdd(form);
+    onSave(form);
     setForm(createEmptyAppointmentForm());
     setError("");
     setFormOpen(false);
@@ -1224,23 +1519,22 @@ function AppointmentsSection({
               <DialogHeader>
                 <DialogTitle>Календарь записей</DialogTitle>
               </DialogHeader>
-              <AppointmentCalendar appointments={appointments} />
+              <AppointmentCalendar appointments={active} todayIso={todayIso} />
             </DialogContent>
           </Dialog>
-          <Dialog open={formOpen} onOpenChange={(open) => {
-            setFormOpen(open);
-            if (open) setForm((current) => ({ ...current, date: current.date || addDays(0), time: current.time || currentTime() }));
-            if (!open) setError("");
+          <Button onClick={() => {
+            onEditCancel();
+            setForm(createEmptyAppointmentForm());
+            setError("");
+            setFormOpen(true);
           }}>
-            <DialogTrigger asChild>
-              <Button>
-                <Plus className="h-4 w-4" />
-                Добавить запись
-              </Button>
-            </DialogTrigger>
+            <Plus className="h-4 w-4" />
+            Добавить запись
+          </Button>
+          <Dialog open={formOpen} onOpenChange={(open) => { if (!open) closeForm(); }}>
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>Новая запись</DialogTitle>
+                <DialogTitle>{editingAppointment ? "Редактировать запись" : "Новая запись"}</DialogTitle>
               </DialogHeader>
               <AppointmentFormView
                 form={form}
@@ -1256,30 +1550,59 @@ function AppointmentsSection({
           </Dialog>
         </div>
       </div>
-      <Tabs defaultValue="today">
+
+      {overdue.length > 0 && (
+        <div className="space-y-3 rounded-xl border border-amber-200 bg-amber-50/60 p-4">
+          <p className="text-sm font-semibold text-amber-800">⚠️ Просроченные записи ({overdue.length}) — клиент не приехал в назначенный день</p>
+          {sortByDate(overdue).map((appointment) => (
+            <AppointmentRow
+              key={appointment.id}
+              appointment={appointment}
+              overdue
+              deleteConfirm={deleteConfirm}
+              onAccept={onAccept}
+              onMove={onMove}
+              onCancel={onCancel}
+              onRestore={onRestore}
+              onEdit={onEdit}
+              onDelete={onDelete}
+              onDeleteRequest={setDeleteConfirm}
+            />
+          ))}
+        </div>
+      )}
+
+      <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="w-full justify-start overflow-x-auto sm:w-auto">
-          {tabs.map((tab) => <TabsTrigger key={tab.id} value={tab.id}>{tab.label}</TabsTrigger>)}
-        </TabsList>
-        {tabs.map((tab) => (
-          <TabsContent key={tab.id} value={tab.id}>
-            <div className="space-y-3">
-              {appointments.filter(tab.filter).length ? appointments
-                .filter(tab.filter)
-                .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`))
-                .map((appointment) => (
-                <AppointmentRow
-                  key={appointment.id}
-                  appointment={appointment}
-                  onAccept={onAccept}
-                  onMove={onMove}
-                  onCancel={onCancel}
-                />
-              )) : (
-                <EmptyState title="Записей нет" text="На выбранный период предварительных записей не найдено." />
+          {tabs.map((item) => (
+            <TabsTrigger key={item.id} value={item.id}>
+              {item.label}
+              {item.count > 0 && (
+                <span className="ml-1.5 rounded-full bg-slate-200 px-1.5 text-xs font-semibold text-slate-600">{item.count}</span>
               )}
-            </div>
-          </TabsContent>
-        ))}
+            </TabsTrigger>
+          ))}
+        </TabsList>
+        <TabsContent value={tab}>
+          <div className="space-y-3">
+            {visible.length ? visible.map((appointment) => (
+              <AppointmentRow
+                key={appointment.id}
+                appointment={appointment}
+                deleteConfirm={deleteConfirm}
+                onAccept={onAccept}
+                onMove={onMove}
+                onCancel={onCancel}
+                onRestore={onRestore}
+                onEdit={onEdit}
+                onDelete={onDelete}
+                onDeleteRequest={setDeleteConfirm}
+              />
+            )) : (
+              <EmptyState title="Записей нет" text="На выбранный период предварительных записей не найдено." />
+            )}
+          </div>
+        </TabsContent>
       </Tabs>
     </div>
   );
@@ -1347,9 +1670,9 @@ function AppointmentFormView({
   );
 }
 
-function AppointmentCalendar({ appointments }: { appointments: Appointment[] }) {
+function AppointmentCalendar({ appointments, todayIso }: { appointments: Appointment[]; todayIso: string }) {
   const sorted = [...appointments].sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
-  const dates = sorted.length ? sorted.map((appointment) => appointment.date) : [addDays(0)];
+  const dates = sorted.length ? sorted.map((appointment) => appointment.date) : [todayIso];
   const first = dateAtNoon(dates.reduce((min, date) => (date < min ? date : min), dates[0]));
   const last = dateAtNoon(dates.reduce((max, date) => (date > max ? date : max), dates[0]));
   const start = new Date(first.getTime() - mondayOffset(first) * dayMs);
@@ -1382,7 +1705,7 @@ function AppointmentCalendar({ appointments }: { appointments: Appointment[] }) 
             <div key={date} className="min-h-32 bg-white p-2">
               <div className="mb-2 flex items-center justify-between gap-2">
                 <span className="font-semibold">{new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "2-digit" }).format(day)}</span>
-                {date === addDays(0) && <Badge>Сегодня</Badge>}
+                {date === todayIso && <Badge>Сегодня</Badge>}
               </div>
               <div className="space-y-1.5">
                 {dayAppointments.map((appointment) => (
@@ -1424,18 +1747,33 @@ function mondayOffset(date: Date) {
 
 function AppointmentRow({
   appointment,
+  overdue,
+  deleteConfirm,
   onAccept,
   onMove,
-  onCancel
+  onCancel,
+  onRestore,
+  onEdit,
+  onDelete,
+  onDeleteRequest
 }: {
   appointment: Appointment;
+  overdue?: boolean;
+  deleteConfirm: string | null;
   onAccept: (appointment: Appointment) => void;
   onMove: (appointment: Appointment) => void;
   onCancel: (appointment: Appointment) => void;
+  onRestore: (appointment: Appointment) => void;
+  onEdit: (appointment: Appointment) => void;
+  onDelete: (id: string) => void;
+  onDeleteRequest: (id: string | null) => void;
 }) {
+  const isDeleting = deleteConfirm === appointment.id;
+  const isArchived = appointment.state !== "active";
+
   return (
-    <Card className={appointment.state === "cancelled" ? "opacity-55" : ""}>
-      <CardContent className="grid gap-4 p-4 lg:grid-cols-[0.8fr_1.1fr_1.3fr_auto] lg:items-center">
+    <Card className={`${isArchived ? "opacity-70" : ""} ${overdue ? "border-amber-200" : ""}`}>
+      <CardContent className="grid gap-4 p-4 lg:grid-cols-[0.9fr_1.1fr_1.3fr_auto] lg:items-center">
         <div>
           <p className="font-semibold">{formatDate(appointment.date)}</p>
           <p className="text-sm text-muted-foreground">{appointment.time}</p>
@@ -1448,15 +1786,29 @@ function AppointmentRow({
           <p className="font-medium">{appointment.car} {appointment.plate}</p>
           <p className="text-sm text-muted-foreground">{appointment.plannedService}{appointment.comment ? `, ${appointment.comment}` : ""}</p>
         </div>
-        <div className="flex flex-wrap gap-2 lg:justify-end">
-          {appointment.state === "accepted" ? (
-            <Badge className="border-green-200 bg-green-50 text-green-700">В работе</Badge>
+        <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+          {isDeleting ? (
+            <>
+              <span className="text-sm text-muted-foreground">Удалить запись?</span>
+              <Button variant="secondary" size="sm" onClick={() => onDeleteRequest(null)}>Нет</Button>
+              <Button size="sm" className="bg-red-600 hover:bg-red-700" onClick={() => { onDelete(appointment.id); onDeleteRequest(null); }}>Да</Button>
+            </>
+          ) : appointment.state === "accepted" ? (
+            <>
+              <Badge className="border-green-200 bg-green-50 text-green-700">Принята в работу</Badge>
+              <Button variant="secondary" size="sm" className="text-red-500" onClick={() => onDeleteRequest(appointment.id)}>Удалить</Button>
+            </>
           ) : appointment.state === "cancelled" ? (
-            <Badge>Отменена</Badge>
+            <>
+              <Badge>Отменена</Badge>
+              <Button variant="secondary" size="sm" onClick={() => onRestore(appointment)}>Вернуть</Button>
+              <Button variant="secondary" size="sm" className="text-red-500" onClick={() => onDeleteRequest(appointment.id)}>Удалить</Button>
+            </>
           ) : (
             <>
-              <Button size="sm" onClick={() => onAccept(appointment)}>Принять в работу</Button>
-              <Button variant="secondary" size="sm" onClick={() => onMove(appointment)}>Перенести</Button>
+              <Button size="sm" onClick={() => onAccept(appointment)}>Принять</Button>
+              <Button variant="secondary" size="sm" onClick={() => onEdit(appointment)}>Изменить</Button>
+              <Button variant="secondary" size="sm" onClick={() => onMove(appointment)}>+1 день</Button>
               <Button variant="secondary" size="sm" onClick={() => onCancel(appointment)}>Отменить</Button>
             </>
           )}
@@ -1485,31 +1837,52 @@ function ClientsSection({
         </div>
       </div>
       <div className="grid gap-3 xl:grid-cols-2">
-        {clients.length ? clients.map((client) => (
-          <Card key={`${client.name}-${client.phone}-${client.cars.join("-")}`}>
+        {clients.length ? clients.map((client) => {
+          const sortedVisits = [...client.visits].sort((a, b) => b.date.localeCompare(a.date));
+          return (
+          <Card key={`${client.phone || client.name}-${client.cars[0] ?? ""}`}>
             <CardHeader>
-              <CardTitle>{client.name}</CardTitle>
-              <p className="text-sm text-muted-foreground">{client.phone || "Телефон не указан"}</p>
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <CardTitle>{client.name}</CardTitle>
+                  <p className="text-sm text-muted-foreground">{client.phone || "Телефон не указан"}</p>
+                </div>
+                <Badge className="shrink-0">{client.visits.length} визит{plural(client.visits.length)}</Badge>
+              </div>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="flex flex-wrap gap-2">
-                {client.cars.map((car) => <Badge key={car}>{car}</Badge>)}
+                {client.cars.length ? client.cars.map((car) => <Badge key={car}>{car}</Badge>) : <span className="text-sm text-muted-foreground">Авто не указано</span>}
               </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Info label="Общая сумма" value={formatMoney(client.total)} />
-                <Info label="Последний визит" value={formatDate(client.lastVisit)} />
+              <div className="grid gap-3 sm:grid-cols-3">
+                <Info label="Всего" value={formatMoney(client.total)} />
+                <Info label="Оплачено" value={formatMoney(client.paid)} />
+                <Info label="Последний визит" value={client.lastVisit ? formatDate(client.lastVisit) : "—"} />
               </div>
+              {client.upcoming.length > 0 && (
+                <div className="rounded-lg border border-blue-200 bg-blue-50/60 px-3 py-2 text-sm">
+                  <span className="font-medium text-blue-700">📅 Записан: </span>
+                  {client.upcoming
+                    .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`))
+                    .map((appointment) => `${formatDate(appointment.date)} в ${appointment.time} — ${appointment.plannedService}`)
+                    .join("; ")}
+                </div>
+              )}
               <div className="space-y-2">
-                {client.visits.slice(0, 4).map((visit) => (
+                {sortedVisits.slice(0, 4).map((visit) => (
                   <div key={visit.id} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2 text-sm">
-                    <span>{formatDate(visit.date)} · {visit.works.map((work) => work.name).join(", ")}</span>
+                    <span className="min-w-0 truncate">{formatDate(visit.date)} · {visit.works.map((work) => work.name).join(", ") || "—"}</span>
                     <span className="shrink-0 font-medium">{formatMoney(visitTotal(visit))}</span>
                   </div>
                 ))}
+                {sortedVisits.length > 4 && (
+                  <p className="text-xs text-muted-foreground">…и ещё {sortedVisits.length - 4} визит{plural(sortedVisits.length - 4)}</p>
+                )}
               </div>
             </CardContent>
           </Card>
-        )) : (
+          );
+        }) : (
           <EmptyState title="Клиенты не найдены" text="Измените поиск или добавьте заезд, чтобы карточка клиента появилась автоматически." />
         )}
       </div>
@@ -1524,38 +1897,69 @@ function OrdersSection({
   onSelect
 }: {
   visits: Visit[];
-  selected: Visit;
+  selected: Visit | undefined;
   company: CompanySettings;
   onSelect: (id: string) => void;
 }) {
+  const [query, setQuery] = useState("");
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const sorted = [...visits].sort((a, b) => `${b.date} ${b.time}`.localeCompare(`${a.date} ${a.time}`));
+    if (!q) return sorted;
+    return sorted.filter((visit) =>
+      `${orderNumber(visit)} ${visit.client} ${visit.car} ${visit.plate} ${visit.phone}`.toLowerCase().includes(q)
+    );
+  }, [visits, query]);
+
+  if (!visits.length) {
+    return <EmptyState title="Заказ-нарядов нет" text="Они появятся после добавления заездов в разделе «Сегодня»." />;
+  }
+
   return (
     <div className="grid gap-5 xl:grid-cols-[360px_1fr]">
       <div className="space-y-3">
         <h2 className="text-2xl font-semibold">Заказ-наряды</h2>
-        {visits.length ? visits.map((visit) => (
-          <button
-            key={visit.id}
-            className={`block w-full rounded-lg border p-4 text-left transition-colors ${
-              selected.id === visit.id ? "border-blue-600 bg-blue-50" : "border-border bg-white hover:bg-muted"
-            }`}
-            onClick={() => onSelect(visit.id)}
-          >
-            <p className="font-semibold">№ {orderNumber(visit)}</p>
-            <p className="mt-1 text-sm text-muted-foreground">{formatDate(visit.date)} · {visit.car} {visit.plate}</p>
-            <p className="mt-2 text-sm font-medium">{formatMoney(visitTotal(visit))}</p>
-          </button>
-        )) : (
-          <EmptyState title="Заказ-нарядов нет" text="Они появятся после добавления заездов." />
-        )}
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="№, клиент, авто, госномер" />
+        </div>
+        <div className="max-h-[70vh] space-y-2 overflow-y-auto pr-1">
+          {filtered.length ? filtered.map((visit) => (
+            <button
+              key={visit.id}
+              className={`block w-full rounded-xl border p-4 text-left transition-all ${
+                selected?.id === visit.id ? "border-blue-500 bg-blue-50/70 shadow-md shadow-blue-100" : "border-border/60 bg-white shadow-sm hover:border-blue-200 hover:shadow-md"
+              }`}
+              onClick={() => onSelect(visit.id)}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <p className="font-semibold">№ {orderNumber(visit)}</p>
+                <Badge className={statusClass(visit.status)}>{visit.status}</Badge>
+              </div>
+              <p className="mt-1 text-sm text-muted-foreground">{formatDate(visit.date)} · {visit.car} {visit.plate}</p>
+              <p className="mt-1 text-sm text-muted-foreground">{visit.client || "Клиент не указан"}</p>
+              <p className="mt-2 text-sm font-medium">{formatMoney(visitTotal(visit))}</p>
+            </button>
+          )) : (
+            <p className="px-1 py-4 text-sm text-muted-foreground">По запросу «{query}» ничего не найдено.</p>
+          )}
+        </div>
       </div>
       <div className="space-y-3">
-        <div className="flex justify-end">
-          <Button onClick={() => window.print()}>
-            <Printer className="h-4 w-4" />
-            Печать заказ-наряда
-          </Button>
-        </div>
-        <OrderPrintSheet visit={selected} company={company} />
+        {selected ? (
+          <>
+            <div className="flex justify-end">
+              <Button onClick={() => window.print()}>
+                <Printer className="h-4 w-4" />
+                Печать заказ-наряда
+              </Button>
+            </div>
+            <OrderPrintSheet visit={selected} company={company} />
+          </>
+        ) : (
+          <EmptyState title="Выберите заказ-наряд" text="Нажмите на заказ слева, чтобы открыть его для печати." />
+        )}
       </div>
     </div>
   );
@@ -1635,46 +2039,74 @@ function TotalRow({ label, value, strong }: { label: string; value: number; stro
 }
 
 function DaySummarySection({
-  date,
-  totals
+  visits,
+  mechanics,
+  todayIso
 }: {
-  date: string;
-  totals: ReturnType<typeof buildDayTotals>;
+  visits: Visit[];
   mechanics: Mechanic[];
+  todayIso: string;
 }) {
+  const [date, setDate] = useState(todayIso);
+  const dayVisits = useMemo(() => visits.filter((visit) => visit.date === date), [visits, date]);
+  const totals = useMemo(() => buildDayTotals(dayVisits, mechanics), [dayVisits, mechanics]);
+
   return (
     <div className="space-y-5">
-      <div>
-        <h2 className="text-2xl font-semibold">Итог дня</h2>
-        <p className="text-sm text-muted-foreground">{formatDate(date)}</p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h2 className="text-2xl font-semibold">Итог дня</h2>
+          <p className="text-sm text-muted-foreground">{formatDate(date)}</p>
+        </div>
+        <div className="flex items-end gap-2">
+          <Field label="Дата">
+            <Input type="date" max={todayIso} value={date} onChange={(event) => setDate(event.target.value || todayIso)} className="w-44" />
+          </Field>
+          {date !== todayIso && (
+            <Button variant="secondary" onClick={() => setDate(todayIso)}>Сегодня</Button>
+          )}
+        </div>
       </div>
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Всего заездов" value={totals.visits} />
-        <StatCard label="Выручка всего" value={formatMoney(totals.total)} />
-        <StatCard label="Запчасти/материалы" value={formatMoney(totals.parts)} />
-        <StatCard label="Чистый итог дня" value={formatMoney(totals.clean)} />
-      </div>
-      <Card>
-        <CardContent className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-5">
-          <Info label="Наличные" value={formatMoney(totals.byPayment["Наличные"])} />
-          <Info label="Перевод" value={formatMoney(totals.byPayment["Перевод"])} />
-          <Info label="Терминал" value={formatMoney(totals.byPayment["Терминал"])} />
-          <Info label="Безнал" value={formatMoney(totals.byPayment["Безнал"])} />
-          <Info label="Не оплачено" value={formatMoney(totals.byPayment["Не оплачено"])} />
-        </CardContent>
-      </Card>
-      <DataTable
-        headers={["Механик", "Работ", "Сумма работ", "Процент", "Начислено", "Выдано", "Остаток"]}
-        rows={totals.mechanicRows.map((row) => [
-          row.mechanic,
-          `${row.works}`,
-          formatMoney(row.labor),
-          `${row.percent}%`,
-          formatMoney(row.accrued),
-          formatMoney(row.paid),
-          formatMoney(row.balance)
-        ])}
-      />
+      {totals.visits === 0 ? (
+        <EmptyState title="За этот день заездов нет" text="Выберите другую дату или добавьте заезд в разделе «Сегодня»." />
+      ) : (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <StatCard label="Всего заездов" value={totals.visits} />
+            <StatCard label="Выручка" value={formatMoney(totals.total)} />
+            <StatCard label="Не оплачено" value={formatMoney(totals.unpaid)} />
+            <StatCard label="Чистыми" value={formatMoney(totals.clean)} />
+          </div>
+          <Card>
+            <CardHeader><CardTitle>Поступления по способам оплаты</CardTitle></CardHeader>
+            <CardContent className="grid gap-3 p-4 pt-0 sm:grid-cols-2 xl:grid-cols-5">
+              <Info label="Наличные" value={formatMoney(totals.byPayment["Наличные"])} />
+              <Info label="Перевод" value={formatMoney(totals.byPayment["Перевод"])} />
+              <Info label="Терминал" value={formatMoney(totals.byPayment["Терминал"])} />
+              <Info label="Безнал" value={formatMoney(totals.byPayment["Безнал"])} />
+              <Info label="Не оплачено" value={formatMoney(totals.byPayment["Не оплачено"])} />
+            </CardContent>
+          </Card>
+          <div className="space-y-2">
+            <h3 className="text-sm font-semibold text-muted-foreground">Начислено мастерам за день</h3>
+            {totals.mechanicRows.length ? (
+              <DataTable
+                headers={["Мастер", "Заездов", "Сумма работ", "Процент", "Начислено за день"]}
+                rows={totals.mechanicRows.map((row) => [
+                  row.mechanic,
+                  `${row.works}`,
+                  formatMoney(row.labor),
+                  `${row.percent}%`,
+                  formatMoney(row.accrued)
+                ])}
+              />
+            ) : (
+              <p className="text-sm text-muted-foreground">В этот день работы мастеров не выполнялись.</p>
+            )}
+            <p className="text-xs text-muted-foreground">Итоговый расчёт с мастерами (за всё время) — в разделе «Настройки».</p>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -1691,7 +2123,7 @@ function StatsSection({ visits, mechanics }: { visits: Visit[]; mechanics: Mecha
       <h2 className="text-2xl font-semibold">Статистика</h2>
       <div className="grid gap-4 xl:grid-cols-3">
         {periods.map((period) => {
-          const from = new Date(today.getTime() - (period.days - 1) * dayMs);
+          const from = new Date(todayDate().getTime() - (period.days - 1) * dayMs);
           const slice = visits.filter((visit) => new Date(`${visit.date}T12:00:00`) >= from);
           const total = sum(slice.map(visitTotal));
           const paid = sum(slice.filter(isPaid).map(visitTotal));
@@ -1736,6 +2168,14 @@ function StatsSection({ visits, mechanics }: { visits: Visit[]; mechanics: Mecha
   );
 }
 
+function nextMechanicId(mechanics: Mechanic[]) {
+  const max = mechanics.reduce((acc, mechanic) => {
+    const num = Number(mechanic.id.replace(/\D/g, ""));
+    return Number.isFinite(num) ? Math.max(acc, num) : acc;
+  }, 0);
+  return `m-${max + 1}`;
+}
+
 function SettingsSection({
   state,
   setState
@@ -1743,55 +2183,159 @@ function SettingsSection({
   state: AppState;
   setState: React.Dispatch<React.SetStateAction<AppState>>;
 }) {
+  const [newService, setNewService] = useState("");
+  const [newMechanic, setNewMechanic] = useState("");
+  const settlement = useMemo(() => buildMechanicSettlement(state.visits, state.mechanics), [state.visits, state.mechanics]);
+
+  const updateMechanic = (id: string, patch: Partial<Mechanic>) =>
+    setState((current) => ({
+      ...current,
+      mechanics: current.mechanics.map((item) => (item.id === id ? { ...item, ...patch } : item))
+    }));
+
+  const addMechanic = () => {
+    const name = newMechanic.trim();
+    if (!name) return;
+    setState((current) => ({
+      ...current,
+      mechanics: [...current.mechanics, { id: nextMechanicId(current.mechanics), name, percent: 40, paid: 0 }]
+    }));
+    setNewMechanic("");
+  };
+
+  const removeMechanic = (id: string) =>
+    setState((current) => ({ ...current, mechanics: current.mechanics.filter((item) => item.id !== id) }));
+
+  const addService = () => {
+    const name = newService.trim();
+    if (!name) return;
+    setState((current) =>
+      current.services.includes(name) ? current : { ...current, services: [...current.services, name] }
+    );
+    setNewService("");
+  };
+
+  const removeService = (name: string) =>
+    setState((current) => ({ ...current, services: current.services.filter((item) => item !== name) }));
+
   return (
     <div className="space-y-5">
       <h2 className="text-2xl font-semibold">Настройки</h2>
       <div className="grid gap-5 xl:grid-cols-2">
         <Card>
-          <CardHeader><CardTitle>Механики</CardTitle></CardHeader>
+          <CardHeader><CardTitle>Мастера</CardTitle></CardHeader>
           <CardContent className="space-y-3">
+            <div className="hidden gap-3 px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground sm:grid sm:grid-cols-[1fr_96px_40px]">
+              <span>Имя</span>
+              <span>Процент</span>
+              <span></span>
+            </div>
             {state.mechanics.map((mechanic) => (
-              <div key={mechanic.id} className="grid gap-3 sm:grid-cols-[1fr_120px_120px]">
+              <div key={mechanic.id} className="grid gap-3 sm:grid-cols-[1fr_96px_40px] sm:items-center">
                 <Input
                   value={mechanic.name}
-                  onChange={(event) => setState((current) => ({
-                    ...current,
-                    mechanics: current.mechanics.map((item) => item.id === mechanic.id ? { ...item, name: event.target.value } : item)
-                  }))}
+                  onChange={(event) => updateMechanic(mechanic.id, { name: event.target.value })}
                 />
-                <Input
-                  type="number"
-                  value={mechanic.percent}
-                  onChange={(event) => setState((current) => ({
-                    ...current,
-                    mechanics: current.mechanics.map((item) => item.id === mechanic.id ? { ...item, percent: Number(event.target.value) } : item)
-                  }))}
-                />
-                <Input
-                  type="number"
-                  value={mechanic.paid}
-                  onChange={(event) => setState((current) => ({
-                    ...current,
-                    mechanics: current.mechanics.map((item) => item.id === mechanic.id ? { ...item, paid: Number(event.target.value) } : item)
-                  }))}
-                />
+                <div className="relative">
+                  <Input
+                    type="number"
+                    min={0}
+                    max={100}
+                    value={mechanic.percent}
+                    onChange={(event) => updateMechanic(mechanic.id, { percent: Math.min(100, Math.max(0, Number(event.target.value) || 0)) })}
+                  />
+                </div>
+                <Button variant="secondary" size="sm" className="h-9 w-9 p-0 text-red-500 hover:bg-red-50 hover:text-red-600" onClick={() => removeMechanic(mechanic.id)} title="Удалить мастера">
+                  <Trash2 className="h-4 w-4" />
+                </Button>
               </div>
             ))}
+            <div className="flex gap-2 pt-1">
+              <Input
+                value={newMechanic}
+                placeholder="Имя нового мастера"
+                onChange={(event) => setNewMechanic(event.target.value)}
+                onKeyDown={(event) => event.key === "Enter" && addMechanic()}
+              />
+              <Button variant="secondary" onClick={addMechanic}>
+                <Plus className="h-4 w-4" />
+                Добавить
+              </Button>
+            </div>
           </CardContent>
         </Card>
+
         <Card>
           <CardHeader><CardTitle>Типовые услуги</CardTitle></CardHeader>
-          <CardContent>
-            <Textarea
-              className="min-h-64"
-              value={state.services.join("\n")}
-              onChange={(event) => setState((current) => ({
-                ...current,
-                services: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean)
-              }))}
-            />
+          <CardContent className="space-y-3">
+            <div className="flex flex-wrap gap-2">
+              {state.services.map((service) => (
+                <span key={service} className="inline-flex items-center gap-1.5 rounded-full border border-border bg-slate-50 py-1 pl-3 pr-1.5 text-sm">
+                  {service}
+                  <button className="flex h-5 w-5 items-center justify-center rounded-full text-muted-foreground hover:bg-red-100 hover:text-red-600" onClick={() => removeService(service)} title="Удалить">
+                    ×
+                  </button>
+                </span>
+              ))}
+              {!state.services.length && <span className="text-sm text-muted-foreground">Услуги не добавлены</span>}
+            </div>
+            <div className="flex gap-2">
+              <Input
+                value={newService}
+                placeholder="Новая услуга"
+                onChange={(event) => setNewService(event.target.value)}
+                onKeyDown={(event) => event.key === "Enter" && addService()}
+              />
+              <Button variant="secondary" onClick={addService}>
+                <Plus className="h-4 w-4" />
+                Добавить
+              </Button>
+            </div>
           </CardContent>
         </Card>
+
+        <Card className="xl:col-span-2">
+          <CardHeader>
+            <CardTitle>Расчёт с мастерами</CardTitle>
+            <p className="text-sm text-muted-foreground">Начислено по всем заездам за всё время минус уже выданное.</p>
+          </CardHeader>
+          <CardContent className="overflow-x-auto p-0">
+            <table className="w-full min-w-[640px] border-collapse text-sm">
+              <thead>
+                <tr className="border-y border-border/60 text-left">
+                  {["Мастер", "Заездов", "Начислено всего", "Выдано", "Остаток", ""].map((header) => (
+                    <th key={header} className="px-5 py-3 text-xs font-medium uppercase tracking-wider text-muted-foreground">{header}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {settlement.map((row) => (
+                  <tr key={row.id} className="border-b border-border/40 last:border-b-0">
+                    <td className="px-5 py-3 font-medium">{row.mechanic}</td>
+                    <td className="px-5 py-3">{row.works}</td>
+                    <td className="px-5 py-3">{formatMoney(row.accrued)}</td>
+                    <td className="px-5 py-3">
+                      <Input
+                        type="number"
+                        min={0}
+                        value={row.paid}
+                        className="h-8 w-28"
+                        onChange={(event) => updateMechanic(row.id, { paid: Math.max(0, Number(event.target.value) || 0) })}
+                      />
+                    </td>
+                    <td className={`px-5 py-3 font-semibold ${row.balance > 0 ? "text-amber-600" : "text-emerald-600"}`}>{formatMoney(row.balance)}</td>
+                    <td className="px-5 py-3 text-right">
+                      <Button size="sm" variant="secondary" disabled={row.balance <= 0} onClick={() => updateMechanic(row.id, { paid: row.accrued })}>
+                        Выдать остаток
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+
         <Card className="xl:col-span-2">
           <CardHeader><CardTitle>Реквизиты автосервиса</CardTitle></CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-3">
@@ -1813,18 +2357,18 @@ function SettingsSection({
 
 function DataTable({ headers, rows }: { headers: string[]; rows: string[][] }) {
   return (
-    <Card>
+    <Card className="overflow-hidden border-border/60 shadow-sm">
       <CardContent className="overflow-x-auto p-0">
         <table className="w-full min-w-[720px] border-collapse text-sm">
           <thead>
-            <tr className="border-b border-border bg-muted text-left text-muted-foreground">
-              {headers.map((header) => <th key={header} className="px-4 py-3 font-medium">{header}</th>)}
+            <tr className="border-b border-border/60 text-left">
+              {headers.map((header) => <th key={header} className="px-5 py-3 text-xs font-medium uppercase tracking-wider text-muted-foreground">{header}</th>)}
             </tr>
           </thead>
           <tbody>
             {rows.map((row, rowIndex) => (
-              <tr key={rowIndex} className="border-b border-border last:border-b-0">
-                {row.map((cell, cellIndex) => <td key={`${rowIndex}-${cellIndex}`} className="px-4 py-3">{cell}</td>)}
+              <tr key={rowIndex} className="border-b border-border/40 transition-colors last:border-b-0 hover:bg-slate-50/50">
+                {row.map((cell, cellIndex) => <td key={`${rowIndex}-${cellIndex}`} className="px-5 py-3.5">{cell}</td>)}
               </tr>
             ))}
           </tbody>
