@@ -44,6 +44,7 @@ type WorkItem = {
 type Visit = {
   id: string;
   date: string;
+  time: string;
   client: string;
   phone: string;
   car: string;
@@ -88,6 +89,7 @@ type AppState = {
 };
 
 type VisitForm = {
+  time: string;
   client: string;
   phone: string;
   car: string;
@@ -117,6 +119,11 @@ function isoDate(date: Date) {
 
 function addDays(days: number) {
   return isoDate(new Date(today.getTime() + days * dayMs));
+}
+
+function currentTime() {
+  const now = new Date();
+  return `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 }
 
 function formatDate(value: string) {
@@ -182,6 +189,26 @@ function parseItems(text: string, fallbackAmount: number): WorkItem[] {
   }));
 }
 
+function createEmptyForm(): VisitForm {
+  return {
+    time: currentTime(),
+    client: "",
+    phone: "",
+    car: "",
+    plate: "",
+    mileage: "",
+    vin: "",
+    worksText: "Замена масла",
+    mechanic: "Аркаша",
+    laborAmount: "2500",
+    partsText: "",
+    partsAmount: "0",
+    paymentMethod: "Не оплачено",
+    status: "В работе",
+    comment: ""
+  };
+}
+
 const mockState: AppState = {
   mechanics: [
     { id: "m-1", name: "Аркаша", percent: 50, paid: 1500 },
@@ -210,6 +237,7 @@ const mockState: AppState = {
     {
       id: "v-101",
       date: addDays(0),
+      time: "09:20",
       client: "Иван Петров",
       phone: "+7 923 111-22-33",
       car: "Toyota Camry",
@@ -231,6 +259,7 @@ const mockState: AppState = {
     {
       id: "v-102",
       date: addDays(0),
+      time: "10:10",
       client: "",
       phone: "",
       car: "Hyundai Solaris",
@@ -249,6 +278,7 @@ const mockState: AppState = {
     {
       id: "v-103",
       date: addDays(0),
+      time: "11:30",
       client: "Марина Соколова",
       phone: "+7 913 555-10-20",
       car: "Kia Sportage",
@@ -267,6 +297,7 @@ const mockState: AppState = {
     {
       id: "v-095",
       date: addDays(-5),
+      time: "12:15",
       client: "Иван Петров",
       phone: "+7 923 111-22-33",
       car: "Toyota Camry",
@@ -323,23 +354,6 @@ const mockState: AppState = {
   ]
 };
 
-const emptyForm: VisitForm = {
-  client: "",
-  phone: "",
-  car: "",
-  plate: "",
-  mileage: "",
-  vin: "",
-  worksText: "Замена масла",
-  mechanic: "Аркаша",
-  laborAmount: "2500",
-  partsText: "",
-  partsAmount: "0",
-  paymentMethod: "Не оплачено",
-  status: "В работе",
-  comment: ""
-};
-
 const nav = [
   { id: "today", label: "Сегодня", href: "/", icon: CalendarDays },
   { id: "appointments", label: "Записи", href: "/appointments", icon: ClipboardList },
@@ -361,7 +375,7 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("Наличные");
   const [selectedOrderId, setSelectedOrderId] = useState(initialOrderId ?? mockState.visits[0].id);
   const [clientSearch, setClientSearch] = useState("");
-  const [form, setForm] = useState<VisitForm>(emptyForm);
+  const [form, setForm] = useState<VisitForm>(() => createEmptyForm());
   const [formError, setFormError] = useState("");
   const [notice, setNotice] = useState("");
 
@@ -430,6 +444,7 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
     const visit: Visit = {
       id: nextVisitId(state.visits),
       date: todayIso,
+      time: form.time || currentTime(),
       client: form.client.trim(),
       phone: form.phone.trim(),
       car: form.car.trim(),
@@ -448,7 +463,7 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
 
     setState((current) => ({ ...current, visits: [visit, ...current.visits] }));
     setSelectedOrderId(visit.id);
-    setForm(emptyForm);
+    setForm(createEmptyForm());
     setFormError("");
     setFormOpen(false);
     showNotice(`Заезд добавлен: ${visit.car}`);
@@ -458,6 +473,7 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
     const visit: Visit = {
       id: nextVisitId(state.visits),
       date: todayIso,
+      time: appointment.time || currentTime(),
       client: appointment.client,
       phone: appointment.phone,
       car: appointment.car,
@@ -529,6 +545,7 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
               </Button>
               <Dialog open={formOpen} onOpenChange={(open) => {
                 setFormOpen(open);
+                if (open) setForm((current) => ({ ...current, time: current.time || currentTime() }));
                 if (!open) setFormError("");
               }}>
             <DialogTrigger asChild>
@@ -702,10 +719,13 @@ function buildDayTotals(visits: Visit[], mechanics: Mechanic[]) {
   });
 
   const mechanicRows = mechanics.map((mechanic) => {
-    const labor = sum(visits.filter((visit) => visit.mechanic === mechanic.name).map((visit) => visit.laborAmount));
+    const mechanicVisits = visits.filter((visit) => visit.mechanic === mechanic.name);
+    const labor = sum(mechanicVisits.map((visit) => visit.laborAmount));
+    const works = sum(mechanicVisits.map((visit) => Math.max(visit.works.length, 1)));
     const accrued = Math.round((labor * mechanic.percent) / 100);
     return {
       mechanic: mechanic.name,
+      works,
       labor,
       percent: mechanic.percent,
       accrued,
@@ -795,6 +815,8 @@ function TodaySection({
   onOrder: (visit: Visit) => void;
   onPaid: (visit: Visit) => void;
 }) {
+  const sortedVisits = [...visits].sort((a, b) => (a.time || "99:99").localeCompare(b.time || "99:99"));
+
   return (
     <div className="space-y-5">
       <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
@@ -803,69 +825,156 @@ function TodaySection({
           <p className="text-sm text-muted-foreground">{formatDate(date)}</p>
         </div>
       </div>
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8">
         <StatCard label="Заезды сегодня" value={totals.visits} />
         <StatCard label="Выручка" value={formatMoney(totals.total)} />
-        <StatCard label="Оплачено" value={formatMoney(totals.paid)} />
+        <StatCard label="Наличные" value={formatMoney(totals.byPayment["Наличные"])} />
+        <StatCard label="Перевод" value={formatMoney(totals.byPayment["Перевод"])} />
+        <StatCard label="Терминал" value={formatMoney(totals.byPayment["Терминал"])} />
+        <StatCard label="Безнал" value={formatMoney(totals.byPayment["Безнал"])} />
         <StatCard label="Не оплачено" value={formatMoney(totals.unpaid)} />
-        <StatCard label="Начислено механикам" value={formatMoney(totals.mechanicAccrued)} />
+        <StatCard label="Чистыми" value={formatMoney(totals.clean)} />
       </div>
-      <div className="overflow-hidden rounded-lg border border-border bg-white">
-        <div className="hidden grid-cols-[1.2fr_1.4fr_0.8fr_0.8fr_250px] gap-4 border-b border-border bg-slate-50 px-4 py-3 text-xs font-semibold uppercase text-muted-foreground lg:grid">
-          <span>Автомобиль</span>
-          <span>Работы</span>
-          <span>Сумма</span>
-          <span>Статус</span>
-          <span className="text-right">Действия</span>
-        </div>
-        {visits.length ? visits.map((visit) => (
-          <VisitRow key={visit.id} visit={visit} onOpen={onOpen} onOrder={onOrder} onPaid={onPaid} />
+      <div className="overflow-hidden rounded-lg border border-border bg-white lg:overflow-x-auto">
+        {sortedVisits.length ? sortedVisits.map((visit, index) => (
+          <VisitRow
+            key={visit.id}
+            index={index}
+            visit={visit}
+            onOpen={onOpen}
+            onOrder={onOrder}
+            onPaid={onPaid}
+          />
         )) : (
           <EmptyState title="Заездов сегодня пока нет" text="Добавьте первый заезд через кнопку в верхней панели." />
         )}
       </div>
+      <MechanicTotalsTable rows={totals.mechanicRows} />
     </div>
   );
 }
 
 function VisitRow({
+  index,
   visit,
   onOpen,
   onOrder,
   onPaid
 }: {
+  index: number;
   visit: Visit;
   onOpen: (visit: Visit) => void;
   onOrder: (visit: Visit) => void;
   onPaid: (visit: Visit) => void;
 }) {
   return (
-    <div className="grid gap-4 border-b border-border p-4 last:border-b-0 lg:grid-cols-[1.2fr_1.4fr_0.8fr_0.8fr_250px] lg:items-center">
+    <>
+      {index === 0 && (
+        <div className="hidden min-w-[1180px] grid-cols-[44px_70px_1.25fr_1.25fr_1.4fr_92px_96px_96px_96px_100px_110px_220px] gap-3 border-b border-border bg-slate-50 px-3 py-3 text-xs font-semibold uppercase text-muted-foreground lg:grid">
+          <span>№</span>
+          <span>Время</span>
+          <span>Авто / госномер</span>
+          <span>Клиент / телефон</span>
+          <span>Работы</span>
+          <span>Мастер</span>
+          <span className="text-right">Работа ₽</span>
+          <span className="text-right">Запчасти ₽</span>
+          <span className="text-right">Итого</span>
+          <span>Оплата</span>
+          <span>Статус</span>
+          <span className="text-right">Действия</span>
+        </div>
+      )}
+      <div className="hidden min-w-[1180px] grid-cols-[44px_70px_1.25fr_1.25fr_1.4fr_92px_96px_96px_96px_100px_110px_220px] gap-3 border-b border-border px-3 py-3 text-sm last:border-b-0 lg:grid lg:items-center">
+        <span className="text-muted-foreground">{index + 1}</span>
+        <span className="font-medium">{visit.time || "—"}</span>
         <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="font-semibold">{visit.car}</p>
-            {visit.plate && <Badge>{visit.plate}</Badge>}
-          </div>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {visit.client || "Клиент не указан"}{visit.phone ? `, ${visit.phone}` : ""}
-          </p>
+          <p className="truncate font-medium">{visit.car}</p>
+          <p className="text-xs text-muted-foreground">{visit.plate || "Без номера"}</p>
         </div>
-        <div className="min-w-0 text-sm">
-          <p className="font-medium">{visit.works.map((work) => work.name).join(", ")}</p>
-          <p className="mt-1 text-muted-foreground">Механик: {visit.mechanic}</p>
+        <div className="min-w-0">
+          <p className="truncate font-medium">{visit.client || "Клиент не указан"}</p>
+          <p className="truncate text-xs text-muted-foreground">{visit.phone || "Телефон не указан"}</p>
         </div>
-        <div>
-          <p className="font-semibold">{formatMoney(visitTotal(visit))}</p>
-          <p className="text-sm text-muted-foreground">{visit.paymentMethod}</p>
-        </div>
+        <p className="min-w-0 truncate">{visit.works.map((work) => work.name).join(", ") || "Работы не указаны"}</p>
+        <span>{visit.mechanic}</span>
+        <span className="text-right font-medium">{formatMoney(visit.laborAmount)}</span>
+        <span className="text-right">{formatMoney(visit.partsAmount)}</span>
+        <span className="text-right font-semibold">{formatMoney(visitTotal(visit))}</span>
+        <span>{visit.paymentMethod}</span>
         <Badge className={statusClass(visit.status)}>{visit.status}</Badge>
-        <div className="flex flex-wrap gap-2 lg:justify-end">
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button variant="secondary" size="sm" onClick={() => onOpen(visit)}>Открыть</Button>
+          <Button variant="secondary" size="sm" onClick={() => onOrder(visit)}>ЗН</Button>
+          <Button size="sm" onClick={() => onPaid(visit)}>
+            {isPaid(visit) ? "Оплата" : "Оплатить"}
+          </Button>
+        </div>
+      </div>
+      <div className="space-y-3 border-b border-border p-3 last:border-b-0 lg:hidden">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-semibold">{visit.time || "—"}</span>
+              <p className="font-semibold">{visit.car}</p>
+              {visit.plate && <Badge>{visit.plate}</Badge>}
+            </div>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {visit.client || "Клиент не указан"}{visit.phone ? `, ${visit.phone}` : ""}
+            </p>
+          </div>
+          <Badge className={statusClass(visit.status)}>{visit.status}</Badge>
+        </div>
+        <div className="grid grid-cols-2 gap-2 text-sm">
+          <Info label="Работы" value={visit.works.map((work) => work.name).join(", ") || "Не указаны"} />
+          <Info label="Мастер" value={visit.mechanic} />
+          <Info label="Работа" value={formatMoney(visit.laborAmount)} />
+          <Info label="Запчасти" value={formatMoney(visit.partsAmount)} />
+          <Info label="Итого" value={formatMoney(visitTotal(visit))} />
+          <Info label="Оплата" value={visit.paymentMethod} />
+        </div>
+        <div className="flex flex-wrap gap-2">
           <Button variant="secondary" size="sm" onClick={() => onOpen(visit)}>Открыть</Button>
           <Button variant="secondary" size="sm" onClick={() => onOrder(visit)}>Заказ-наряд</Button>
           <Button size="sm" onClick={() => onPaid(visit)}>
             {isPaid(visit) ? "Изменить оплату" : "Оплатить"}
           </Button>
         </div>
+      </div>
+    </>
+  );
+}
+
+function MechanicTotalsTable({ rows }: { rows: ReturnType<typeof buildDayTotals>["mechanicRows"] }) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-border bg-white">
+      <div className="border-b border-border bg-slate-50 px-4 py-3">
+        <h3 className="font-semibold">Итог по мастерам</h3>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[760px] border-collapse text-sm">
+          <thead>
+            <tr className="border-b border-border bg-muted text-left text-muted-foreground">
+              {["Мастер", "Работ", "Сумма работ", "%", "Начислено", "Выдано", "Остаток"].map((header) => (
+                <th key={header} className="px-4 py-3 font-medium">{header}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.mechanic} className="border-b border-border last:border-b-0">
+                <td className="px-4 py-3 font-medium">{row.mechanic}</td>
+                <td className="px-4 py-3">{row.works}</td>
+                <td className="px-4 py-3">{formatMoney(row.labor)}</td>
+                <td className="px-4 py-3">{row.percent}%</td>
+                <td className="px-4 py-3">{formatMoney(row.accrued)}</td>
+                <td className="px-4 py-3">{formatMoney(row.paid)}</td>
+                <td className="px-4 py-3 font-semibold">{formatMoney(row.balance)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -896,33 +1005,30 @@ function VisitFormView({
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="Клиент"><Input value={form.client} onChange={(event) => set("client", event.target.value)} /></Field>
-        <Field label="Телефон"><Input value={form.phone} onChange={(event) => set("phone", event.target.value)} /></Field>
+      <div className="rounded-lg border border-border p-4">
+        <h3 className="font-semibold">Основное</h3>
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <Field label="Время">
+            <Input type="time" value={form.time} onChange={(event) => set("time", event.target.value)} />
+          </Field>
         <Field label="Автомобиль *"><Input value={form.car} onChange={(event) => set("car", event.target.value)} /></Field>
         <Field label="Госномер"><Input value={form.plate} onChange={(event) => set("plate", event.target.value)} /></Field>
-        <Field label="Пробег"><Input value={form.mileage} onChange={(event) => set("mileage", event.target.value)} /></Field>
-        <Field label="VIN"><Input value={form.vin} onChange={(event) => set("vin", event.target.value)} /></Field>
-      </div>
-      <Field label="Работы/услуги *">
-        <Input
-          list="services"
-          value={form.worksText}
-          onChange={(event) => set("worksText", event.target.value)}
-        />
-        <datalist id="services">
-          {services.map((service) => <option key={service} value={service} />)}
-        </datalist>
-      </Field>
-      <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Работы *">
+            <Input
+              list="services"
+              value={form.worksText}
+              onChange={(event) => set("worksText", event.target.value)}
+            />
+            <datalist id="services">
+              {services.map((service) => <option key={service} value={service} />)}
+            </datalist>
+          </Field>
         <Field label="Механик">
           <NativeSelect value={form.mechanic} onChange={(event) => set("mechanic", event.target.value)}>
             {mechanics.map((mechanic) => <option key={mechanic.id} value={mechanic.name}>{mechanic.name}</option>)}
           </NativeSelect>
         </Field>
         <Field label="Сумма работ *"><Input type="number" value={form.laborAmount} onChange={(event) => set("laborAmount", event.target.value)} /></Field>
-        <Field label="Запчасти/материалы"><Input value={form.partsText} onChange={(event) => set("partsText", event.target.value)} /></Field>
-        <Field label="Сумма запчастей"><Input type="number" value={form.partsAmount} onChange={(event) => set("partsAmount", event.target.value)} /></Field>
         <Field label="Способ оплаты">
           <NativeSelect value={form.paymentMethod} onChange={(event) => set("paymentMethod", event.target.value as PaymentMethod)}>
             {paymentMethods.map((method) => <option key={method} value={method}>{method}</option>)}
@@ -933,8 +1039,22 @@ function VisitFormView({
             {statuses.map((status) => <option key={status} value={status}>{status}</option>)}
           </NativeSelect>
         </Field>
+        </div>
       </div>
-      <Field label="Комментарий"><Textarea value={form.comment} onChange={(event) => set("comment", event.target.value)} /></Field>
+      <div className="rounded-lg border border-border p-4">
+        <h3 className="font-semibold">Дополнительно</h3>
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <Field label="Клиент"><Input value={form.client} onChange={(event) => set("client", event.target.value)} /></Field>
+          <Field label="Телефон"><Input value={form.phone} onChange={(event) => set("phone", event.target.value)} /></Field>
+          <Field label="Пробег"><Input value={form.mileage} onChange={(event) => set("mileage", event.target.value)} /></Field>
+          <Field label="VIN"><Input value={form.vin} onChange={(event) => set("vin", event.target.value)} /></Field>
+          <Field label="Запчасти/материалы"><Input value={form.partsText} onChange={(event) => set("partsText", event.target.value)} /></Field>
+          <Field label="Сумма запчастей"><Input type="number" value={form.partsAmount} onChange={(event) => set("partsAmount", event.target.value)} /></Field>
+        </div>
+        <div className="mt-4">
+          <Field label="Комментарий"><Textarea value={form.comment} onChange={(event) => set("comment", event.target.value)} /></Field>
+        </div>
+      </div>
       {error && (
         <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700">
           {error}
@@ -970,6 +1090,7 @@ function VisitDetails({ visit }: { visit: Visit }) {
     <div className="grid gap-4 text-sm sm:grid-cols-2">
       <Info label="Клиент" value={visit.client || "Не указан"} />
       <Info label="Телефон" value={visit.phone || "Не указан"} />
+      <Info label="Время" value={visit.time || "—"} />
       <Info label="Автомобиль" value={visit.car} />
       <Info label="Госномер" value={visit.plate || "Не указан"} />
       <Info label="VIN" value={visit.vin || "Не указан"} />
@@ -1195,7 +1316,7 @@ function OrderPrintSheet({ visit, company }: { visit: Visit; company: CompanySet
         <div className="text-left sm:text-right">
           <p className="text-sm text-slate-500">Заказ-наряд</p>
           <p className="text-lg font-bold">№ {orderNumber(visit)}</p>
-          <p className="text-sm">{formatDate(visit.date)}</p>
+          <p className="text-sm">{formatDate(visit.date)}{visit.time ? `, ${visit.time}` : ""}</p>
         </div>
       </div>
       <div className="grid gap-4 border-b border-slate-300 py-5 text-sm sm:grid-cols-2">
@@ -1282,9 +1403,10 @@ function DaySummarySection({
         </CardContent>
       </Card>
       <DataTable
-        headers={["Механик", "Сумма работ", "Процент", "Начислено", "Выдано", "Остаток"]}
+        headers={["Механик", "Работ", "Сумма работ", "Процент", "Начислено", "Выдано", "Остаток"]}
         rows={totals.mechanicRows.map((row) => [
           row.mechanic,
+          `${row.works}`,
           formatMoney(row.labor),
           `${row.percent}%`,
           formatMoney(row.accrued),
