@@ -106,6 +106,17 @@ type VisitForm = {
   comment: string;
 };
 
+type AppointmentForm = {
+  date: string;
+  time: string;
+  client: string;
+  phone: string;
+  car: string;
+  plate: string;
+  plannedService: string;
+  comment: string;
+};
+
 const paymentMethods: PaymentMethod[] = ["Не оплачено", "Наличные", "Перевод", "Терминал", "Безнал"];
 const statuses: VisitStatus[] = ["Запланирован", "В работе", "Завершён", "Оплачен"];
 const storageKey = "m1-autoservice-mvp-v2";
@@ -163,6 +174,15 @@ function nextVisitId(visits: Visit[]) {
   return `v-${next}`;
 }
 
+function nextAppointmentId(appointments: Appointment[]) {
+  const next = appointments.reduce((max, appointment) => {
+    const number = Number(appointment.id.replace(/\D/g, ""));
+    return Number.isFinite(number) ? Math.max(max, number) : max;
+  }, 0) + 1;
+
+  return `a-${next}`;
+}
+
 function statusForPayment(paymentMethod: PaymentMethod, current: VisitStatus) {
   if (paymentMethod !== "Не оплачено") return "Оплачен";
   return current === "Оплачен" ? "Завершён" : current;
@@ -205,6 +225,19 @@ function createEmptyForm(): VisitForm {
     partsAmount: "0",
     paymentMethod: "Не оплачено",
     status: "В работе",
+    comment: ""
+  };
+}
+
+function createEmptyAppointmentForm(): AppointmentForm {
+  return {
+    date: addDays(0),
+    time: currentTime(),
+    client: "",
+    phone: "",
+    car: "",
+    plate: "",
+    plannedService: "Замена масла",
     comment: ""
   };
 }
@@ -469,6 +502,27 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
     showNotice(`Заезд добавлен: ${visit.car}`);
   }
 
+  function addAppointment(form: AppointmentForm) {
+    const appointment: Appointment = {
+      id: nextAppointmentId(state.appointments),
+      date: form.date,
+      time: form.time || currentTime(),
+      client: form.client.trim(),
+      phone: form.phone.trim(),
+      car: form.car.trim(),
+      plate: form.plate.trim().toUpperCase(),
+      plannedService: form.plannedService.trim(),
+      comment: form.comment.trim(),
+      state: "active"
+    };
+
+    setState((current) => ({
+      ...current,
+      appointments: [...current.appointments, appointment]
+    }));
+    showNotice(`Запись добавлена: ${appointment.car}`);
+  }
+
   function acceptAppointment(appointment: Appointment) {
     const visit: Visit = {
       id: nextVisitId(state.visits),
@@ -621,6 +675,8 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
           {section === "appointments" && (
             <AppointmentsSection
               appointments={state.appointments}
+              services={state.services}
+              onAdd={addAppointment}
               onAccept={acceptAppointment}
               onMove={moveAppointment}
               onCancel={cancelAppointment}
@@ -1117,24 +1173,89 @@ function Info({ label, value }: { label: string; value: string }) {
 
 function AppointmentsSection({
   appointments,
+  services,
+  onAdd,
   onAccept,
   onMove,
   onCancel
 }: {
   appointments: Appointment[];
+  services: string[];
+  onAdd: (form: AppointmentForm) => void;
   onAccept: (appointment: Appointment) => void;
   onMove: (appointment: Appointment) => void;
   onCancel: (appointment: Appointment) => void;
 }) {
+  const [formOpen, setFormOpen] = useState(false);
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [form, setForm] = useState<AppointmentForm>(() => createEmptyAppointmentForm());
+  const [error, setError] = useState("");
   const tabs = [
     { id: "today", label: "Сегодня", filter: (item: Appointment) => item.date === addDays(0) },
     { id: "tomorrow", label: "Завтра", filter: (item: Appointment) => item.date === addDays(1) },
     { id: "week", label: "Неделя", filter: (item: Appointment) => item.date >= addDays(0) && item.date <= addDays(7) }
   ];
 
+  function submitAppointment() {
+    if (!form.date || !form.time || !form.car.trim() || !form.plannedService.trim()) {
+      setError("Заполните дату, время, автомобиль и услугу.");
+      return;
+    }
+
+    onAdd(form);
+    setForm(createEmptyAppointmentForm());
+    setError("");
+    setFormOpen(false);
+  }
+
   return (
     <div className="space-y-5">
-      <h2 className="text-2xl font-semibold">Записи</h2>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <h2 className="text-2xl font-semibold">Записи</h2>
+        <div className="flex flex-wrap gap-2">
+          <Dialog open={calendarOpen} onOpenChange={setCalendarOpen}>
+            <DialogTrigger asChild>
+              <Button variant="secondary">
+                <CalendarDays className="h-4 w-4" />
+                Календарь
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="max-w-6xl">
+              <DialogHeader>
+                <DialogTitle>Календарь записей</DialogTitle>
+              </DialogHeader>
+              <AppointmentCalendar appointments={appointments} />
+            </DialogContent>
+          </Dialog>
+          <Dialog open={formOpen} onOpenChange={(open) => {
+            setFormOpen(open);
+            if (open) setForm((current) => ({ ...current, date: current.date || addDays(0), time: current.time || currentTime() }));
+            if (!open) setError("");
+          }}>
+            <DialogTrigger asChild>
+              <Button>
+                <Plus className="h-4 w-4" />
+                Добавить запись
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Новая запись</DialogTitle>
+              </DialogHeader>
+              <AppointmentFormView
+                form={form}
+                error={error}
+                services={services}
+                onChange={(nextForm) => {
+                  setForm(nextForm);
+                  if (error) setError("");
+                }}
+                onSubmit={submitAppointment}
+              />
+            </DialogContent>
+          </Dialog>
+        </div>
+      </div>
       <Tabs defaultValue="today">
         <TabsList className="w-full justify-start overflow-x-auto sm:w-auto">
           {tabs.map((tab) => <TabsTrigger key={tab.id} value={tab.id}>{tab.label}</TabsTrigger>)}
@@ -1142,7 +1263,10 @@ function AppointmentsSection({
         {tabs.map((tab) => (
           <TabsContent key={tab.id} value={tab.id}>
             <div className="space-y-3">
-              {appointments.filter(tab.filter).length ? appointments.filter(tab.filter).map((appointment) => (
+              {appointments.filter(tab.filter).length ? appointments
+                .filter(tab.filter)
+                .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`))
+                .map((appointment) => (
                 <AppointmentRow
                   key={appointment.id}
                   appointment={appointment}
@@ -1159,6 +1283,143 @@ function AppointmentsSection({
       </Tabs>
     </div>
   );
+}
+
+function AppointmentFormView({
+  form,
+  error,
+  services,
+  onChange,
+  onSubmit
+}: {
+  form: AppointmentForm;
+  error: string;
+  services: string[];
+  onChange: (form: AppointmentForm) => void;
+  onSubmit: () => void;
+}) {
+  const set = <K extends keyof AppointmentForm>(key: K, value: AppointmentForm[K]) => onChange({ ...form, [key]: value });
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="Дата">
+          <Input type="date" value={form.date} onChange={(event) => set("date", event.target.value)} />
+        </Field>
+        <Field label="Время">
+          <Input type="time" value={form.time} onChange={(event) => set("time", event.target.value)} />
+        </Field>
+        <Field label="Клиент">
+          <Input value={form.client} onChange={(event) => set("client", event.target.value)} />
+        </Field>
+        <Field label="Телефон">
+          <Input value={form.phone} onChange={(event) => set("phone", event.target.value)} />
+        </Field>
+        <Field label="Автомобиль *">
+          <Input value={form.car} onChange={(event) => set("car", event.target.value)} />
+        </Field>
+        <Field label="Госномер">
+          <Input value={form.plate} onChange={(event) => set("plate", event.target.value)} />
+        </Field>
+      </div>
+      <Field label="Услуга *">
+        <Input
+          list="appointment-services"
+          value={form.plannedService}
+          onChange={(event) => set("plannedService", event.target.value)}
+        />
+        <datalist id="appointment-services">
+          {services.map((service) => <option key={service} value={service} />)}
+        </datalist>
+      </Field>
+      <Field label="Комментарий">
+        <Textarea value={form.comment} onChange={(event) => set("comment", event.target.value)} />
+      </Field>
+      {error && (
+        <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700">
+          {error}
+        </div>
+      )}
+      <div className="flex justify-end">
+        <Button onClick={onSubmit}>Сохранить запись</Button>
+      </div>
+    </div>
+  );
+}
+
+function AppointmentCalendar({ appointments }: { appointments: Appointment[] }) {
+  const sorted = [...appointments].sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
+  const dates = sorted.length ? sorted.map((appointment) => appointment.date) : [addDays(0)];
+  const first = dateAtNoon(dates.reduce((min, date) => (date < min ? date : min), dates[0]));
+  const last = dateAtNoon(dates.reduce((max, date) => (date > max ? date : max), dates[0]));
+  const start = new Date(first.getTime() - mondayOffset(first) * dayMs);
+  const end = new Date(last.getTime() + (6 - mondayOffset(last)) * dayMs);
+  const days: Date[] = [];
+
+  for (let cursor = start; cursor <= end; cursor = new Date(cursor.getTime() + dayMs)) {
+    days.push(cursor);
+  }
+
+  const byDate = new Map<string, Appointment[]>();
+  sorted.forEach((appointment) => {
+    const current = byDate.get(appointment.date) ?? [];
+    current.push(appointment);
+    byDate.set(appointment.date, current);
+  });
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-7 gap-px overflow-hidden rounded-lg border border-border bg-border text-sm">
+        {["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"].map((day) => (
+          <div key={day} className="bg-slate-50 px-2 py-2 text-center text-xs font-semibold uppercase text-muted-foreground">
+            {day}
+          </div>
+        ))}
+        {days.map((day) => {
+          const date = isoDate(day);
+          const dayAppointments = byDate.get(date) ?? [];
+          return (
+            <div key={date} className="min-h-32 bg-white p-2">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="font-semibold">{new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "2-digit" }).format(day)}</span>
+                {date === addDays(0) && <Badge>Сегодня</Badge>}
+              </div>
+              <div className="space-y-1.5">
+                {dayAppointments.map((appointment) => (
+                  <div key={appointment.id} className="rounded-md border border-border bg-slate-50 px-2 py-1.5 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold">{appointment.time}</span>
+                      <AppointmentStateBadge state={appointment.state} />
+                    </div>
+                    <p className="mt-1 font-medium">{appointment.car} {appointment.plate}</p>
+                    <p className="truncate text-muted-foreground">{appointment.client || "Клиент не указан"}</p>
+                    <p className="truncate text-muted-foreground">{appointment.plannedService}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {!appointments.length && (
+        <p className="text-sm text-muted-foreground">Записей пока нет. Добавьте первую запись, и она появится в календаре.</p>
+      )}
+    </div>
+  );
+}
+
+function AppointmentStateBadge({ state }: { state: AppointmentState }) {
+  if (state === "accepted") return <Badge className="border-green-200 bg-green-50 text-green-700">В работе</Badge>;
+  if (state === "cancelled") return <Badge>Отменена</Badge>;
+  return <Badge className="border-blue-200 bg-blue-50 text-blue-700">Запись</Badge>;
+}
+
+function dateAtNoon(value: string) {
+  return new Date(`${value}T12:00:00`);
+}
+
+function mondayOffset(date: Date) {
+  return (date.getDay() + 6) % 7;
 }
 
 function AppointmentRow({
