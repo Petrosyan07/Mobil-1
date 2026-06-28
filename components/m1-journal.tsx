@@ -13,6 +13,7 @@ import {
   Search,
   Settings,
   Trash2,
+  UserRound,
   Users
 } from "lucide-react";
 import Link from "next/link";
@@ -26,6 +27,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { cn } from "@/lib/utils";
 
 type PaymentMethod = "Наличные" | "Перевод" | "Терминал" | "Безнал" | "Не оплачено";
 type VisitStatus = "Запланирован" | "В работе" | "Завершён" | "Оплачен";
@@ -38,9 +40,25 @@ type Mechanic = {
   paid: number;
 };
 
+type PayrollPayment = {
+  id: string;
+  mechanicId: string;
+  date: string;
+  amount: number;
+  method: PaymentMethod;
+  comment: string;
+};
+
 type WorkItem = {
   name: string;
   amount: number;
+};
+
+type ServiceItem = {
+  id: string;
+  name: string;
+  price: number;
+  category: string;
 };
 
 type Visit = {
@@ -58,6 +76,7 @@ type Visit = {
   laborAmount: number;
   parts: WorkItem[];
   partsAmount: number;
+  mechanicId?: string;
   paymentMethod: PaymentMethod;
   status: VisitStatus;
   comment: string;
@@ -76,21 +95,74 @@ type Appointment = {
   state: AppointmentState;
 };
 
+type SavedClient = {
+  id: string;
+  name: string;
+  phone: string;
+  car: string;
+  plate: string;
+  mileage: string;
+  vin: string;
+  note: string;
+  createdAt: string;
+};
+
+type ClientVehicle = {
+  key: string;
+  label: string;
+  car: string;
+  plate: string;
+  mileage: string;
+  vin: string;
+};
+
 type CompanySettings = {
   name: string;
+  legalName?: string;
   address: string;
   phone: string;
+  email?: string;
+  website?: string;
+  taxId?: string;
+  registrationId?: string;
+  workHours?: string;
+  director?: string;
+};
+
+type AppPreferences = {
+  defaultPaymentMethod: PaymentMethod;
+  defaultMechanicPercent: number;
+  warrantyDays: number;
+  orderPrefix: string;
+  requirePhoneForClient: boolean;
 };
 
 type AppState = {
   visits: Visit[];
   appointments: Appointment[];
   mechanics: Mechanic[];
-  services: string[];
+  services: ServiceItem[];
   company: CompanySettings;
+  savedClients?: SavedClient[];
+  clientNotes?: Record<string, string>;
+  payrollPayments: PayrollPayment[];
+  preferences: AppPreferences;
+};
+
+type MechanicSettlement = {
+  id: string;
+  mechanic: string;
+  works: number;
+  labor: number;
+  percent: number;
+  accrued: number;
+  paid: number;
+  balance: number;
 };
 
 type VisitForm = {
+  clientKey: string;
+  vehicleKey: string;
   time: string;
   client: string;
   phone: string;
@@ -122,6 +194,13 @@ type AppointmentForm = {
 const paymentMethods: PaymentMethod[] = ["Не оплачено", "Наличные", "Перевод", "Терминал", "Безнал"];
 const statuses: VisitStatus[] = ["Запланирован", "В работе", "Завершён", "Оплачен"];
 const storageKey = "m1-autoservice-mvp-v2";
+const defaultPreferences: AppPreferences = {
+  defaultPaymentMethod: "Не оплачено",
+  defaultMechanicPercent: 40,
+  warrantyDays: 14,
+  orderPrefix: "M1",
+  requirePhoneForClient: false
+};
 
 const dayMs = 24 * 60 * 60 * 1000;
 
@@ -205,6 +284,97 @@ function nextAppointmentId(appointments: Appointment[]) {
   return `a-${next}`;
 }
 
+function nextSavedClientId(clients: SavedClient[]) {
+  const next = clients.reduce((max, client) => {
+    const number = Number(client.id.replace(/\D/g, ""));
+    return Number.isFinite(number) ? Math.max(max, number) : max;
+  }, 0) + 1;
+
+  return `c-${next}`;
+}
+
+function nextPayrollPaymentId(payments: PayrollPayment[]) {
+  const next = payments.reduce((max, payment) => {
+    const number = Number(payment.id.replace(/\D/g, ""));
+    return Number.isFinite(number) ? Math.max(max, number) : max;
+  }, 0) + 1;
+
+  return `p-${next}`;
+}
+
+function nextServiceId(services: ServiceItem[]) {
+  const next = services.reduce((max, service) => {
+    const number = Number(service.id.replace(/\D/g, ""));
+    return Number.isFinite(number) ? Math.max(max, number) : max;
+  }, 0) + 1;
+
+  return `s-${next}`;
+}
+
+function serviceDefaults(name: string) {
+  const defaults: Record<string, { price: number; category: string }> = {
+    "замена масла": { price: 1800, category: "ТО" },
+    "диагностика ходовой": { price: 1500, category: "Диагностика" },
+    "компьютерная диагностика": { price: 1800, category: "Диагностика" },
+    "шиномонтаж": { price: 2800, category: "Колёса" },
+    "ремонт колеса": { price: 700, category: "Колёса" },
+    "замена тормозных колодок": { price: 3200, category: "Тормоза" },
+    "замена тормозных дисков": { price: 4500, category: "Тормоза" },
+    "замена свечей": { price: 2400, category: "Двигатель" },
+    "заправка кондиционера": { price: 2500, category: "Климат" },
+    "снятие/установка защиты картера": { price: 700, category: "ТО" }
+  };
+
+  return defaults[name.trim().toLowerCase()] ?? { price: 0, category: "Общие" };
+}
+
+function normalizeServices(services: AppState["services"] | string[] | undefined): ServiceItem[] {
+  if (!services?.length) return mockState.services;
+  return services.map((service, index) => {
+    if (typeof service === "string") {
+      const defaults = serviceDefaults(service);
+      return { id: `s-${index + 1}`, name: service, price: defaults.price, category: defaults.category };
+    }
+
+    const defaults = serviceDefaults(service.name);
+    return {
+      id: service.id || `s-${index + 1}`,
+      name: service.name,
+      price: Math.max(0, Number(service.price) || defaults.price),
+      category: service.category === "Общие" && defaults.category !== "Общие" ? defaults.category : service.category || defaults.category
+    };
+  });
+}
+
+function normalizeAppState(saved: AppState): AppState {
+  const mechanics = saved.mechanics?.length ? saved.mechanics : mockState.mechanics;
+  const visits = (saved.visits ?? []).map((visit) => {
+    const byId = visit.mechanicId ? mechanics.find((mechanic) => mechanic.id === visit.mechanicId) : undefined;
+    const byName = mechanics.find((mechanic) => mechanic.name === visit.mechanic);
+    const mechanic = byId ?? byName;
+
+    return {
+      ...visit,
+      mechanicId: mechanic?.id,
+      mechanic: mechanic?.name ?? visit.mechanic
+    };
+  });
+
+  return {
+    ...mockState,
+    ...saved,
+    visits,
+    mechanics,
+    appointments: saved.appointments ?? [],
+    services: normalizeServices(saved.services as AppState["services"] | string[] | undefined),
+    company: { ...mockState.company, ...(saved.company ?? {}) },
+    savedClients: saved.savedClients ?? [],
+    clientNotes: saved.clientNotes ?? {},
+    payrollPayments: saved.payrollPayments ?? [],
+    preferences: { ...defaultPreferences, ...(saved.preferences ?? {}) }
+  };
+}
+
 function statusForPayment(paymentMethod: PaymentMethod, current: VisitStatus): VisitStatus {
   if (paymentMethod !== "Не оплачено") return "Оплачен";
   return current === "Оплачен" ? "Завершён" : current;
@@ -231,8 +401,10 @@ function parseItems(text: string, fallbackAmount: number): WorkItem[] {
   }));
 }
 
-function createEmptyForm(mechanics?: Mechanic[]): VisitForm {
+function createEmptyForm(mechanics?: Mechanic[], preferences: AppPreferences = defaultPreferences): VisitForm {
   return {
+    clientKey: "",
+    vehicleKey: "",
     time: currentTime(),
     client: "",
     phone: "",
@@ -241,11 +413,11 @@ function createEmptyForm(mechanics?: Mechanic[]): VisitForm {
     mileage: "",
     vin: "",
     worksText: "",
-    mechanic: mechanics?.[0]?.name ?? "",
+    mechanic: mechanics?.[0]?.id ?? mechanics?.[0]?.name ?? "",
     laborAmount: "",
     partsText: "",
     partsAmount: "",
-    paymentMethod: "Не оплачено",
+    paymentMethod: preferences.defaultPaymentMethod,
     status: "В работе",
     comment: ""
   };
@@ -272,22 +444,35 @@ const mockState: AppState = {
     { id: "m-4", name: "Дима", percent: 40, paid: 0 }
   ],
   services: [
-    "Замена масла",
-    "Диагностика ходовой",
-    "Компьютерная диагностика",
-    "Шиномонтаж",
-    "Ремонт колеса",
-    "Замена тормозных колодок",
-    "Замена тормозных дисков",
-    "Замена свечей",
-    "Заправка кондиционера",
-    "Снятие/установка защиты картера"
+    { id: "s-1", name: "Замена масла", price: 1800, category: "ТО" },
+    { id: "s-2", name: "Диагностика ходовой", price: 1500, category: "Диагностика" },
+    { id: "s-3", name: "Компьютерная диагностика", price: 1800, category: "Диагностика" },
+    { id: "s-4", name: "Шиномонтаж", price: 2800, category: "Колёса" },
+    { id: "s-5", name: "Ремонт колеса", price: 700, category: "Колёса" },
+    { id: "s-6", name: "Замена тормозных колодок", price: 3200, category: "Тормоза" },
+    { id: "s-7", name: "Замена тормозных дисков", price: 4500, category: "Тормоза" },
+    { id: "s-8", name: "Замена свечей", price: 2400, category: "Двигатель" },
+    { id: "s-9", name: "Заправка кондиционера", price: 2500, category: "Климат" },
+    { id: "s-10", name: "Снятие/установка защиты картера", price: 700, category: "ТО" }
   ],
   company: {
     name: "М1 / Mobil 1 Центр",
+    legalName: "ООО «М1 Автоцентр»",
     address: "Красноярск, ул. Забобонова, 13",
-    phone: "+7 (391) 000-00-00"
+    phone: "+7 (391) 000-00-00",
+    email: "service@m1-auto.local",
+    website: "",
+    taxId: "",
+    registrationId: "",
+    workHours: "Пн-Сб 09:00-20:00",
+    director: ""
   },
+  preferences: {
+    ...defaultPreferences
+  },
+  savedClients: [],
+  clientNotes: {},
+  payrollPayments: [],
   visits: [
     {
       id: "v-101",
@@ -307,6 +492,7 @@ const mockState: AppState = {
       laborAmount: 2500,
       parts: [{ name: "Масло Mobil 1 5W-30", amount: 5200 }],
       partsAmount: 5200,
+      mechanicId: "m-1",
       paymentMethod: "Терминал",
       status: "Оплачен",
       comment: "Фильтр клиента."
@@ -326,6 +512,7 @@ const mockState: AppState = {
       laborAmount: 1500,
       parts: [],
       partsAmount: 0,
+      mechanicId: "m-2",
       paymentMethod: "Не оплачено",
       status: "Завершён",
       comment: "Клиент вернётся после согласования."
@@ -345,6 +532,7 @@ const mockState: AppState = {
       laborAmount: 3200,
       parts: [{ name: "Колодки передние", amount: 4100 }],
       partsAmount: 4100,
+      mechanicId: "m-3",
       paymentMethod: "Перевод",
       status: "Оплачен",
       comment: ""
@@ -364,6 +552,7 @@ const mockState: AppState = {
       laborAmount: 1800,
       parts: [],
       partsAmount: 0,
+      mechanicId: "m-4",
       paymentMethod: "Наличные",
       status: "Оплачен",
       comment: ""
@@ -414,6 +603,7 @@ const nav = [
   { id: "appointments", label: "Записи", href: "/appointments", icon: ClipboardList },
   { id: "clients", label: "Клиенты", href: "/clients", icon: Users },
   { id: "orders", label: "Заказ-наряды", href: "/orders", icon: FileText },
+  { id: "employees", label: "Сотрудники", href: "/employees", icon: UserRound },
   { id: "summary", label: "Итог дня", href: "/summary", icon: CheckCircle2 },
   { id: "stats", label: "Статистика", href: "/stats", icon: CreditCard },
   { id: "settings", label: "Настройки", href: "/settings", icon: Settings }
@@ -428,7 +618,7 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
     const saved = window.localStorage.getItem(storageKey);
     if (saved) {
       try {
-        return JSON.parse(saved) as AppState;
+        return normalizeAppState(JSON.parse(saved) as AppState);
       } catch {
         window.localStorage.removeItem(storageKey);
       }
@@ -441,7 +631,7 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("Наличные");
   const [selectedOrderId, setSelectedOrderId] = useState(() => initialOrderId ?? state.visits[0]?.id ?? "");
   const [clientSearch, setClientSearch] = useState("");
-  const [form, setForm] = useState<VisitForm>(() => createEmptyForm(state.mechanics));
+  const [form, setForm] = useState<VisitForm>(() => createEmptyForm(state.mechanics, state.preferences ?? defaultPreferences));
   const [formError, setFormError] = useState("");
   const [notice, setNotice] = useState("");
   const [editingVisit, setEditingVisit] = useState<Visit | null>(null);
@@ -453,21 +643,44 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
     window.localStorage.setItem(storageKey, JSON.stringify(state));
   }, [state]);
 
+  useEffect(() => {
+    if (section !== "today" || typeof window === "undefined") return;
+    if (window.sessionStorage.getItem("m1-open-new-visit") !== "1") return;
+    window.sessionStorage.removeItem("m1-open-new-visit");
+    openNewVisitForm();
+  }, [section]);
+
   const todayIso = todayIsoDate();
   const todayVisits = useMemo(() => state.visits.filter((visit) => visit.date === todayIso), [state.visits, todayIso]);
   const selectedOrder = state.visits.find((visit) => visit.id === selectedOrderId) ?? todayVisits[0] ?? state.visits[0];
 
   const dayTotals = useMemo(() => buildDayTotals(todayVisits, state.mechanics), [todayVisits, state.mechanics]);
-  const clientCards = useMemo(() => buildClients(state.visits, state.appointments, todayIso), [state.visits, state.appointments, todayIso]);
-  const filteredClients = clientCards.filter((client) => {
-    const query = clientSearch.trim().toLowerCase();
-    if (!query) return true;
-    return `${client.name} ${client.phone} ${client.cars.join(" ")}`.toLowerCase().includes(query);
-  });
+  const clientCards = useMemo(
+    () => buildClients(state.visits, state.appointments, todayIso, state.clientNotes, state.savedClients),
+    [state.visits, state.appointments, state.clientNotes, state.savedClients, todayIso]
+  );
 
   function showNotice(message: string) {
     setNotice(message);
     window.setTimeout(() => setNotice(""), 2200);
+  }
+
+  function openNewVisitForm() {
+    setEditingVisit(null);
+    setAcceptingId(null);
+    setForm(createEmptyForm(state.mechanics, state.preferences ?? defaultPreferences));
+    setFormError("");
+    setFormOpen(true);
+  }
+
+  function openNewVisitFromFloatingButton() {
+    if (section === "today") {
+      openNewVisitForm();
+      return;
+    }
+
+    window.sessionStorage.setItem("m1-open-new-visit", "1");
+    router.push("/");
   }
 
   function updateVisit(id: string, patch: Partial<Visit>) {
@@ -495,6 +708,8 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
   function startEditVisit(visit: Visit) {
     setEditingVisit(visit);
     setForm({
+      clientKey: clientKey(visit.client || "Клиент без имени", visit.phone, visit.plate),
+      vehicleKey: `${visit.car.trim().toLowerCase()}|${visit.plate.trim().toUpperCase()}`,
       time: visit.time,
       client: visit.client,
       phone: visit.phone,
@@ -503,7 +718,7 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
       mileage: visit.mileage,
       vin: visit.vin,
       worksText: visit.works.map((w) => w.name).join(", "),
-      mechanic: visit.mechanic,
+      mechanic: visit.mechanicId ?? visit.mechanic,
       laborAmount: String(visit.laborAmount),
       partsText: visit.parts.map((p) => p.name).join(", "),
       partsAmount: String(visit.partsAmount),
@@ -520,8 +735,9 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
       return;
     }
 
-    const laborAmount = Number(form.laborAmount) || 0;
-    const partsAmount = Number(form.partsAmount) || 0;
+    const laborAmount = Math.max(0, Number(form.laborAmount) || 0);
+    const partsAmount = Math.max(0, Number(form.partsAmount) || 0);
+    const selectedMechanic = state.mechanics.find((mechanic) => mechanic.id === form.mechanic || mechanic.name === form.mechanic);
     const visitData = {
       time: form.time || currentTime(),
       client: form.client.trim(),
@@ -531,7 +747,8 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
       mileage: form.mileage.trim(),
       vin: form.vin.trim().toUpperCase(),
       works: parseItems(form.worksText, laborAmount),
-      mechanic: form.mechanic,
+      mechanic: selectedMechanic?.name ?? form.mechanic,
+      mechanicId: selectedMechanic?.id,
       laborAmount,
       parts: parseItems(form.partsText, partsAmount),
       partsAmount,
@@ -568,7 +785,7 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
 
     setEditingVisit(null);
     setAcceptingId(null);
-    setForm(createEmptyForm(state.mechanics));
+    setForm(createEmptyForm(state.mechanics, state.preferences ?? defaultPreferences));
     setFormError("");
     setFormOpen(false);
   }
@@ -614,6 +831,8 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
     setEditingVisit(null);
     setAcceptingId(appointment.id);
     setForm({
+      clientKey: clientKey(appointment.client || "Клиент без имени", appointment.phone, appointment.plate),
+      vehicleKey: `${appointment.car.trim().toLowerCase()}|${appointment.plate.trim().toUpperCase()}`,
       time: appointment.time || currentTime(),
       client: appointment.client,
       phone: appointment.phone,
@@ -622,7 +841,7 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
       mileage: "",
       vin: "",
       worksText: appointment.plannedService,
-      mechanic: state.mechanics[0]?.name ?? "",
+      mechanic: state.mechanics[0]?.id ?? state.mechanics[0]?.name ?? "",
       laborAmount: "",
       partsText: "",
       partsAmount: "",
@@ -700,6 +919,73 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
     }
   }
 
+  function saveClient(client: ClientCard, data: { name: string; phone: string; note: string }) {
+    const name = data.name.trim() || "Клиент без имени";
+    const phone = data.phone.trim();
+    const nextKey = clientKey(name, phone, client.cars[0] ?? "");
+
+    setState((current) => {
+      const nextNotes = { ...(current.clientNotes ?? {}) };
+      delete nextNotes[client.key];
+      if (data.note.trim()) nextNotes[nextKey] = data.note.trim();
+
+      return {
+        ...current,
+        clientNotes: nextNotes,
+        savedClients: (current.savedClients ?? []).map((saved) =>
+          saved.id === client.savedId || clientKey(saved.name || "Клиент без имени", saved.phone, saved.plate) === client.key
+            ? { ...saved, name, phone, note: data.note.trim() }
+            : saved
+        ),
+        visits: current.visits.map((visit) =>
+          clientKey(visit.client || "Клиент без имени", visit.phone, visit.plate) === client.key
+            ? { ...visit, client: name, phone }
+            : visit
+        ),
+        appointments: current.appointments.map((appointment) =>
+          clientKey(appointment.client || "Клиент без имени", appointment.phone, appointment.plate) === client.key
+            ? { ...appointment, client: name, phone }
+            : appointment
+        )
+      };
+    });
+    showNotice(`Клиент обновлён: ${name}`);
+  }
+
+  function addClient(data: Omit<SavedClient, "id" | "createdAt">) {
+    const name = data.name.trim();
+    const car = data.car.trim();
+    if (!name && !data.phone.trim() && !car && !data.plate.trim()) {
+      showNotice("Заполните имя, телефон или автомобиль клиента");
+      return;
+    }
+
+    const savedClient: SavedClient = {
+      id: nextSavedClientId(state.savedClients ?? []),
+      name: name || "Клиент без имени",
+      phone: data.phone.trim(),
+      car,
+      plate: data.plate.trim().toUpperCase(),
+      mileage: data.mileage.trim(),
+      vin: data.vin.trim().toUpperCase(),
+      note: data.note.trim(),
+      createdAt: todayIso
+    };
+
+    setState((current) => {
+      const nextNotes = { ...(current.clientNotes ?? {}) };
+      const key = clientKey(savedClient.name, savedClient.phone, savedClient.plate);
+      if (savedClient.note) nextNotes[key] = savedClient.note;
+
+      return {
+        ...current,
+        savedClients: [...(current.savedClients ?? []), savedClient],
+        clientNotes: nextNotes
+      };
+    });
+    showNotice(`Клиент добавлен: ${savedClient.name}`);
+  }
+
   function resetDemo() {
     window.localStorage.removeItem(storageKey);
     setState(mockState);
@@ -746,53 +1032,8 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
       </aside>
 
       <div className="flex-1 pl-[220px]">
-        <header className="no-print sticky top-0 z-40 border-b border-border bg-white/80 backdrop-blur-xl">
-          <div className="flex h-16 items-center justify-between px-8">
-            <div>
-              <h1 className="text-lg font-semibold text-foreground">{nav.find((item) => item.id === section)?.label ?? "Сегодня"}</h1>
-              <p className="text-xs text-muted-foreground">{formatDate(todayIso)}</p>
-            </div>
-            <div className="flex items-center gap-3">
-              <Button className="gap-2 rounded-lg bg-blue-600 shadow-md shadow-blue-600/25 hover:bg-blue-700" onClick={() => {
-                setEditingVisit(null);
-                setAcceptingId(null);
-                setForm(createEmptyForm(state.mechanics));
-                setFormOpen(true);
-              }}>
-                <Plus className="h-4 w-4" />
-                Новый заезд
-              </Button>
-              <Dialog open={formOpen} onOpenChange={(open) => {
-                if (!open) {
-                  setFormOpen(false);
-                  setEditingVisit(null);
-                  setAcceptingId(null);
-                  setFormError("");
-                }
-              }}>
-                <DialogContent>
-                  <DialogHeader>
-                    <DialogTitle>{editingVisit ? "Редактировать заезд" : acceptingId ? "Приём записи в работу" : "Новый заезд"}</DialogTitle>
-                  </DialogHeader>
-                  <VisitFormView
-                    form={form}
-                    error={formError}
-                    mechanics={state.mechanics}
-                    services={state.services}
-                    onChange={(nextForm) => {
-                      setForm(nextForm);
-                      if (formError) setFormError("");
-                    }}
-                    onSubmit={saveVisit}
-                  />
-                </DialogContent>
-              </Dialog>
-            </div>
-          </div>
-        </header>
-
         {notice && (
-          <div className="no-print fixed right-6 top-20 z-50 flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm font-medium text-green-700 shadow-lg shadow-green-100">
+          <div className="no-print fixed right-6 top-6 z-50 flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm font-medium text-green-700 shadow-lg shadow-green-100">
             <CheckCircle2 className="h-4 w-4 shrink-0" />
             {notice}
           </div>
@@ -817,6 +1058,7 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
               deleteConfirm={deleteConfirm}
               onDeleteConfirm={deleteVisit}
               onDeleteCancel={() => setDeleteConfirm(null)}
+              onNewVisit={openNewVisitForm}
             />
           )}
 
@@ -839,9 +1081,11 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
 
           {section === "clients" && (
             <ClientsSection
-              clients={filteredClients}
+              clients={clientCards}
               query={clientSearch}
               onQuery={setClientSearch}
+              onSave={saveClient}
+              onAdd={addClient}
             />
           )}
 
@@ -861,6 +1105,10 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
             <DaySummarySection visits={state.visits} mechanics={state.mechanics} todayIso={todayIso} />
           )}
 
+          {section === "employees" && (
+            <EmployeesSection state={state} setState={setState} />
+          )}
+
           {section === "stats" && <StatsSection visits={state.visits} mechanics={state.mechanics} />}
 
           {section === "settings" && (
@@ -869,6 +1117,41 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
         </section>
         </div>
       </div>
+
+      <Dialog open={formOpen} onOpenChange={(open) => {
+        if (!open) {
+          setFormOpen(false);
+          setEditingVisit(null);
+          setAcceptingId(null);
+          setFormError("");
+        }
+      }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{editingVisit ? "Редактировать заезд" : acceptingId ? "Приём записи в работу" : "Новый заезд"}</DialogTitle>
+          </DialogHeader>
+          <VisitFormView
+            form={form}
+            error={formError}
+            mechanics={state.mechanics}
+            services={state.services}
+            clients={clientCards}
+            onChange={(nextForm) => {
+              setForm(nextForm);
+              if (formError) setFormError("");
+            }}
+            onSubmit={saveVisit}
+          />
+        </DialogContent>
+      </Dialog>
+
+      <Button
+        className="no-print fixed bottom-6 right-6 z-50 h-14 w-14 rounded-full bg-blue-600 p-0 shadow-xl shadow-blue-600/30 hover:bg-blue-700"
+        onClick={openNewVisitFromFloatingButton}
+        title={section === "today" ? "Новый заезд" : "Перейти на сегодня и добавить заезд"}
+      >
+        <Plus className="h-6 w-6" />
+      </Button>
 
       <Dialog open={Boolean(detailVisit)} onOpenChange={(open) => !open && setDetailVisit(null)}>
         <DialogContent className="max-w-2xl">
@@ -918,8 +1201,17 @@ export default function M1Journal({ section = "today", initialOrderId }: { secti
   );
 }
 
-function mechanicPercent(mechanics: Mechanic[], name: string) {
-  return mechanics.find((mechanic) => mechanic.name === name)?.percent ?? 0;
+function findMechanic(mechanics: Mechanic[], visit: Visit) {
+  return mechanics.find((mechanic) => mechanic.id === visit.mechanicId) ??
+    mechanics.find((mechanic) => mechanic.name === visit.mechanic);
+}
+
+function mechanicPercent(mechanics: Mechanic[], visit: Visit) {
+  return findMechanic(mechanics, visit)?.percent ?? 0;
+}
+
+function visitMechanicAccrued(visit: Visit, mechanics: Mechanic[]) {
+  return Math.round((visit.laborAmount * mechanicPercent(mechanics, visit)) / 100);
 }
 
 function buildDayTotals(visits: Visit[], mechanics: Mechanic[]) {
@@ -937,13 +1229,11 @@ function buildDayTotals(visits: Visit[], mechanics: Mechanic[]) {
   // «Чистыми» считаем только по фактически полученным деньгам (оплаченные заезды):
   // оплачено − стоимость запчастей по оплаченным − зарплата мастеров с оплаченных работ.
   const paidParts = sum(paidVisits.map((visit) => visit.partsAmount));
-  const paidMechanicAccrued = sum(paidVisits.map((visit) =>
-    Math.round((visit.laborAmount * mechanicPercent(mechanics, visit.mechanic)) / 100)
-  ));
+  const paidMechanicAccrued = sum(paidVisits.map((visit) => visitMechanicAccrued(visit, mechanics)));
 
   // Сводка по мастерам — только за этот день (начислено за день).
   const mechanicRows = mechanics.map((mechanic) => {
-    const mechanicVisits = visits.filter((visit) => visit.mechanic === mechanic.name);
+    const mechanicVisits = visits.filter((visit) => findMechanic(mechanics, visit)?.id === mechanic.id);
     const labor = sum(mechanicVisits.map((visit) => visit.laborAmount));
     const works = mechanicVisits.length;
     const accrued = Math.round((labor * mechanic.percent) / 100);
@@ -970,10 +1260,10 @@ function buildDayTotals(visits: Visit[], mechanics: Mechanic[]) {
   };
 }
 
-// Расчёт с мастерами за всё время: начислено по всем заездам минус уже выданное.
-function buildMechanicSettlement(visits: Visit[], mechanics: Mechanic[]) {
+// Расчёт с сотрудниками за всё время: начислено по всем заездам минус уже выданное.
+function buildMechanicSettlement(visits: Visit[], mechanics: Mechanic[]): MechanicSettlement[] {
   return mechanics.map((mechanic) => {
-    const mechanicVisits = visits.filter((visit) => visit.mechanic === mechanic.name);
+    const mechanicVisits = visits.filter((visit) => findMechanic(mechanics, visit)?.id === mechanic.id);
     const labor = sum(mechanicVisits.map((visit) => visit.laborAmount));
     const accrued = Math.round((labor * mechanic.percent) / 100);
     return {
@@ -998,25 +1288,57 @@ function normalizePhone(phone: string) {
 }
 
 type ClientCard = {
+  key: string;
+  savedId?: string;
   name: string;
   phone: string;
   cars: string[];
+  vehicles: ClientVehicle[];
   visits: Visit[];
   upcoming: Appointment[];
   total: number;
   paid: number;
+  unpaid: number;
+  average: number;
+  firstVisit: string;
   lastVisit: string;
+  nextAppointment: string;
+  note: string;
 };
 
-function buildClients(visits: Visit[], appointments: Appointment[], todayIso: string): ClientCard[] {
-  const map = new Map<string, ClientCard>();
+// Ключ клиента: нормализованный телефон, иначе — имя в нижнем регистре, иначе госномер.
+function clientKey(name: string, phone: string, plate: string) {
+  const normalized = normalizePhone(phone);
+  if (normalized) return `tel:${normalized}`;
+  if (name.trim()) return `name:${name.trim().toLowerCase()}`;
+  return `car:${plate || "—"}`;
+}
 
-  // Ключ клиента: нормализованный телефон, иначе — имя в нижнем регистре, иначе госномер.
-  const clientKey = (name: string, phone: string, plate: string) => {
-    const normalized = normalizePhone(phone);
-    if (normalized) return `tel:${normalized}`;
-    if (name.trim()) return `name:${name.trim().toLowerCase()}`;
-    return `car:${plate || "—"}`;
+function buildClients(
+  visits: Visit[],
+  appointments: Appointment[],
+  todayIso: string,
+  notes: Record<string, string> = {},
+  savedClients: SavedClient[] = []
+): ClientCard[] {
+  const map = new Map<string, ClientCard>();
+  const upsertVehicle = (card: ClientCard, vehicle: Omit<ClientVehicle, "key" | "label">) => {
+    const key = `${vehicle.car.trim().toLowerCase()}|${vehicle.plate.trim().toUpperCase()}`;
+    if (!vehicle.car.trim() && !vehicle.plate.trim()) return;
+    const label = `${vehicle.car}${vehicle.plate ? `, ${vehicle.plate}` : ""}`;
+    const existingIndex = card.vehicles.findIndex((item) => item.key === key);
+    const nextVehicle: ClientVehicle = { key, label, ...vehicle };
+    if (existingIndex >= 0) {
+      card.vehicles[existingIndex] = {
+        ...card.vehicles[existingIndex],
+        ...nextVehicle,
+        mileage: nextVehicle.mileage || card.vehicles[existingIndex].mileage,
+        vin: nextVehicle.vin || card.vehicles[existingIndex].vin
+      };
+    } else {
+      card.vehicles.push(nextVehicle);
+    }
+    if (!card.cars.includes(label)) card.cars.push(label);
   };
 
   const ensure = (name: string, phone: string, plate: string): ClientCard => {
@@ -1028,32 +1350,78 @@ function buildClients(visits: Visit[], appointments: Appointment[], todayIso: st
       if (!existing.phone && phone) existing.phone = phone;
       return existing;
     }
-    const card: ClientCard = { name, phone, cars: [], visits: [], upcoming: [], total: 0, paid: 0, lastVisit: "" };
+    const card: ClientCard = {
+      key,
+      name,
+      phone,
+      cars: [],
+      vehicles: [],
+      visits: [],
+      upcoming: [],
+      total: 0,
+      paid: 0,
+      unpaid: 0,
+      average: 0,
+      firstVisit: "",
+      lastVisit: "",
+      nextAppointment: "",
+      note: notes[key] ?? ""
+    };
     map.set(key, card);
     return card;
   };
 
+  savedClients.forEach((saved) => {
+    const card = ensure(saved.name || "Клиент без имени", saved.phone, saved.plate);
+    card.savedId = saved.id;
+    if (saved.note && !card.note) card.note = saved.note;
+    upsertVehicle(card, {
+      car: saved.car,
+      plate: saved.plate,
+      mileage: saved.mileage,
+      vin: saved.vin
+    });
+  });
+
   visits.forEach((visit) => {
     const name = visit.client || "Клиент без имени";
     const card = ensure(name, visit.phone, visit.plate);
-    const carTitle = `${visit.car}${visit.plate ? `, ${visit.plate}` : ""}`;
-    if (carTitle.trim() && !card.cars.includes(carTitle)) card.cars.push(carTitle);
+    upsertVehicle(card, {
+      car: visit.car,
+      plate: visit.plate,
+      mileage: visit.mileage,
+      vin: visit.vin
+    });
     card.visits.push(visit);
     card.total += visitTotal(visit);
     if (isPaid(visit)) card.paid += visitTotal(visit);
+    card.unpaid = card.total - card.paid;
+    card.average = card.visits.length ? Math.round(card.total / card.visits.length) : 0;
+    if (!card.firstVisit || visit.date < card.firstVisit) card.firstVisit = visit.date;
     if (visit.date > card.lastVisit) card.lastVisit = visit.date;
   });
 
-  // Привязываем предстоящие активные записи к существующим клиентам (без создания новых карточек).
+  // Привязываем предстоящие активные записи и создаём карточку, даже если клиент ещё не приезжал.
   appointments
     .filter((appointment) => appointment.state === "active" && appointment.date >= todayIso)
     .forEach((appointment) => {
-      const key = clientKey(appointment.client || "", appointment.phone, appointment.plate);
-      const card = map.get(key);
-      if (card) card.upcoming.push(appointment);
+      const card = ensure(appointment.client || "Клиент без имени", appointment.phone, appointment.plate);
+      upsertVehicle(card, {
+        car: appointment.car,
+        plate: appointment.plate,
+        mileage: "",
+        vin: ""
+      });
+      card.upcoming.push(appointment);
+      const appointmentStamp = `${appointment.date} ${appointment.time || "00:00"}`;
+      if (!card.nextAppointment || appointmentStamp < card.nextAppointment) card.nextAppointment = appointmentStamp;
     });
 
-  return Array.from(map.values()).sort((a, b) => b.lastVisit.localeCompare(a.lastVisit));
+  return Array.from(map.values()).sort((a, b) => {
+    const bActivity = b.lastVisit || b.nextAppointment;
+    const aActivity = a.lastVisit || a.nextAppointment;
+    return bActivity.localeCompare(aActivity);
+  });
 }
 
 function StatCard({ label, value }: { label: string; value: string | number }) {
@@ -1088,7 +1456,8 @@ function TodaySection({
   onStatusChange,
   deleteConfirm,
   onDeleteConfirm,
-  onDeleteCancel
+  onDeleteCancel,
+  onNewVisit
 }: {
   date: string;
   visits: Visit[];
@@ -1102,6 +1471,7 @@ function TodaySection({
   deleteConfirm: string | null;
   onDeleteConfirm: (id: string) => void;
   onDeleteCancel: () => void;
+  onNewVisit: () => void;
 }) {
   const sortedVisits = [...visits].sort((a, b) => (a.time || "99:99").localeCompare(b.time || "99:99"));
 
@@ -1138,8 +1508,14 @@ function TodaySection({
             onDeleteCancel={onDeleteCancel}
           />
         )) : (
-          <EmptyState title="Заездов сегодня пока нет" text="Добавьте первый заезд через кнопку в верхней панели." />
+          <EmptyState title="Заездов сегодня пока нет" text="Добавьте первый заезд через кнопку ниже." />
         )}
+      </div>
+      <div className="flex justify-center">
+        <Button className="gap-2 rounded-lg bg-blue-600 px-6 shadow-md shadow-blue-600/25 hover:bg-blue-700" onClick={onNewVisit}>
+          <Plus className="h-4 w-4" />
+          Новый заезд
+        </Button>
       </div>
     </div>
   );
@@ -1285,20 +1661,93 @@ function VisitFormView({
   error,
   mechanics,
   services,
+  clients,
   onChange,
   onSubmit
 }: {
   form: VisitForm;
   error: string;
   mechanics: Mechanic[];
-  services: string[];
+  services: ServiceItem[];
+  clients: ClientCard[];
   onChange: (form: VisitForm) => void;
   onSubmit: () => void;
 }) {
   const set = <K extends keyof VisitForm>(key: K, value: VisitForm[K]) => onChange({ ...form, [key]: value });
+  const selectedClient = clients.find((client) => client.key === form.clientKey);
+
+  const chooseClient = (key: string) => {
+    const client = clients.find((item) => item.key === key);
+    if (!client) {
+      onChange({ ...form, clientKey: "", vehicleKey: "" });
+      return;
+    }
+
+    const vehicle = client.vehicles[0];
+    onChange({
+      ...form,
+      clientKey: client.key,
+      vehicleKey: vehicle?.key ?? "",
+      client: client.name,
+      phone: client.phone,
+      car: vehicle?.car ?? form.car,
+      plate: vehicle?.plate ?? form.plate,
+      mileage: vehicle?.mileage ?? form.mileage,
+      vin: vehicle?.vin ?? form.vin
+    });
+  };
+
+  const chooseVehicle = (key: string) => {
+    const vehicle = selectedClient?.vehicles.find((item) => item.key === key);
+    if (!vehicle) {
+      onChange({ ...form, vehicleKey: "" });
+      return;
+    }
+
+    onChange({
+      ...form,
+      vehicleKey: vehicle.key,
+      car: vehicle.car,
+      plate: vehicle.plate,
+      mileage: vehicle.mileage,
+      vin: vehicle.vin
+    });
+  };
+
+  const changeWorks = (value: string) => {
+    const service = services.find((item) => item.name.toLowerCase() === value.trim().toLowerCase());
+    onChange({
+      ...form,
+      worksText: value,
+      laborAmount: service?.price && !form.laborAmount ? String(service.price) : form.laborAmount
+    });
+  };
 
   return (
     <div className="space-y-4">
+      <div className="rounded-lg border border-border p-4">
+        <h3 className="font-semibold">Клиент из базы</h3>
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <Field label="Выбрать клиента">
+            <NativeSelect value={form.clientKey} onChange={(event) => chooseClient(event.target.value)}>
+              <option value="">Ввести вручную</option>
+              {clients.map((client) => (
+                <option key={client.key} value={client.key}>
+                  {client.name}{client.phone ? ` · ${client.phone}` : ""}{client.cars[0] ? ` · ${client.cars[0]}` : ""}
+                </option>
+              ))}
+            </NativeSelect>
+          </Field>
+          <Field label="Автомобиль клиента">
+            <NativeSelect value={form.vehicleKey} onChange={(event) => chooseVehicle(event.target.value)} disabled={!selectedClient?.vehicles.length}>
+              <option value="">{selectedClient?.vehicles.length ? "Выбрать автомобиль" : "Нет автомобилей в базе"}</option>
+              {selectedClient?.vehicles.map((vehicle) => (
+                <option key={vehicle.key} value={vehicle.key}>{vehicle.label}</option>
+              ))}
+            </NativeSelect>
+          </Field>
+        </div>
+      </div>
       <div className="rounded-lg border border-border p-4">
         <h3 className="font-semibold">Основное</h3>
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
@@ -1311,15 +1760,15 @@ function VisitFormView({
             <Input
               list="services"
               value={form.worksText}
-              onChange={(event) => set("worksText", event.target.value)}
+              onChange={(event) => changeWorks(event.target.value)}
             />
             <datalist id="services">
-              {services.map((service) => <option key={service} value={service} />)}
+              {services.map((service) => <option key={service.id} value={service.name} label={service.price ? formatMoney(service.price) : service.category} />)}
             </datalist>
           </Field>
         <Field label="Механик">
           <NativeSelect value={form.mechanic} onChange={(event) => set("mechanic", event.target.value)}>
-            {mechanics.map((mechanic) => <option key={mechanic.id} value={mechanic.name}>{mechanic.name}</option>)}
+            {mechanics.map((mechanic) => <option key={mechanic.id} value={mechanic.id}>{mechanic.name}</option>)}
           </NativeSelect>
         </Field>
         <Field label="Сумма работ *"><Input type="number" value={form.laborAmount} onChange={(event) => set("laborAmount", event.target.value)} /></Field>
@@ -1370,11 +1819,14 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function NativeSelect(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
+function NativeSelect({ className, ...props }: React.SelectHTMLAttributes<HTMLSelectElement>) {
   return (
     <select
       {...props}
-      className="flex h-10 w-full rounded-lg border border-input bg-white px-3 py-2 text-sm outline-none transition-all focus-visible:border-blue-400 focus-visible:ring-2 focus-visible:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
+      className={cn(
+        "flex h-10 w-full rounded-lg border border-input bg-white px-3 py-2 text-sm outline-none transition-all focus-visible:border-blue-400 focus-visible:ring-2 focus-visible:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-50",
+        className
+      )}
     />
   );
 }
@@ -1424,7 +1876,7 @@ function AppointmentsSection({
   onDelete
 }: {
   appointments: Appointment[];
-  services: string[];
+  services: ServiceItem[];
   todayIso: string;
   editingAppointment: Appointment | null;
   onSave: (form: AppointmentForm) => void;
@@ -1617,7 +2069,7 @@ function AppointmentFormView({
 }: {
   form: AppointmentForm;
   error: string;
-  services: string[];
+  services: ServiceItem[];
   onChange: (form: AppointmentForm) => void;
   onSubmit: () => void;
 }) {
@@ -1652,7 +2104,7 @@ function AppointmentFormView({
           onChange={(event) => set("plannedService", event.target.value)}
         />
         <datalist id="appointment-services">
-          {services.map((service) => <option key={service} value={service} />)}
+          {services.map((service) => <option key={service.id} value={service.name} />)}
         </datalist>
       </Field>
       <Field label="Комментарий">
@@ -1821,71 +2273,339 @@ function AppointmentRow({
 function ClientsSection({
   clients,
   query,
-  onQuery
+  onQuery,
+  onSave,
+  onAdd
 }: {
   clients: ReturnType<typeof buildClients>;
   query: string;
   onQuery: (value: string) => void;
+  onSave: (client: ClientCard, data: { name: string; phone: string; note: string }) => void;
+  onAdd: (client: Omit<SavedClient, "id" | "createdAt">) => void;
 }) {
+  const [filter, setFilter] = useState("all");
+  const [sort, setSort] = useState("activity");
+  const [selectedKey, setSelectedKey] = useState(clients[0]?.key ?? "");
+  const [editing, setEditing] = useState(false);
+  const [editForm, setEditForm] = useState({ name: "", phone: "", note: "" });
+  const [addOpen, setAddOpen] = useState(false);
+  const [addForm, setAddForm] = useState<Omit<SavedClient, "id" | "createdAt">>({
+    name: "",
+    phone: "",
+    car: "",
+    plate: "",
+    mileage: "",
+    vin: "",
+    note: ""
+  });
+
+  const visibleClients = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const filtered = clients.filter((client) => {
+      const searchText = `${client.name} ${client.phone} ${client.cars.join(" ")} ${client.note}`.toLowerCase();
+      const matchesQuery = !q || searchText.includes(q);
+      if (!matchesQuery) return false;
+      if (filter === "debt") return client.unpaid > 0;
+      if (filter === "upcoming") return client.upcoming.length > 0;
+      if (filter === "vip") return client.total >= 10000 || client.visits.length >= 3;
+      if (filter === "no-phone") return !client.phone;
+      return true;
+    });
+
+    return filtered.sort((a, b) => {
+      if (sort === "total") return b.total - a.total;
+      if (sort === "debt") return b.unpaid - a.unpaid;
+      if (sort === "name") return a.name.localeCompare(b.name, "ru");
+      const bActivity = b.lastVisit || b.nextAppointment;
+      const aActivity = a.lastVisit || a.nextAppointment;
+      return bActivity.localeCompare(aActivity);
+    });
+  }, [clients, filter, query, sort]);
+
+  const selectedClient = visibleClients.find((client) => client.key === selectedKey) ?? visibleClients[0] ?? clients[0];
+  const totals = {
+    clients: clients.length,
+    visits: sum(clients.map((client) => client.visits.length)),
+    paid: sum(clients.map((client) => client.paid)),
+    unpaid: sum(clients.map((client) => client.unpaid)),
+    upcoming: sum(clients.map((client) => client.upcoming.length))
+  };
+
+  useEffect(() => {
+    if (!selectedClient) return;
+    setSelectedKey(selectedClient.key);
+    setEditForm({ name: selectedClient.name, phone: selectedClient.phone, note: selectedClient.note });
+  }, [selectedClient?.key]);
+
+  const saveEdit = () => {
+    if (!selectedClient) return;
+    onSave(selectedClient, editForm);
+    setEditing(false);
+  };
+
+  const saveNewClient = () => {
+    onAdd(addForm);
+    setAddForm({ name: "", phone: "", car: "", plate: "", mileage: "", vin: "", note: "" });
+    setAddOpen(false);
+  };
+
+  const filters = [
+    { id: "all", label: "Все" },
+    { id: "debt", label: "С долгом" },
+    { id: "upcoming", label: "Записаны" },
+    { id: "vip", label: "Постоянные" },
+    { id: "no-phone", label: "Без телефона" }
+  ];
+
   return (
     <div className="space-y-5">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <h2 className="text-2xl font-semibold">Клиенты</h2>
-        <div className="relative sm:w-80">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input className="pl-9" value={query} onChange={(event) => onQuery(event.target.value)} placeholder="Имя, телефон, госномер" />
+      <div className="flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
+        <div>
+          <h2 className="text-2xl font-semibold">Клиенты</h2>
+          <p className="text-sm text-muted-foreground">База клиентов, долги, будущие записи и история обращений.</p>
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+          <div className="relative sm:w-80">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input className="pl-9" value={query} onChange={(event) => onQuery(event.target.value)} placeholder="Имя, телефон, госномер, заметка" />
+          </div>
+          <NativeSelect value={sort} onChange={(event) => setSort(event.target.value)} className="sm:w-44">
+            <option value="activity">Сначала активные</option>
+            <option value="total">По выручке</option>
+            <option value="debt">По долгу</option>
+            <option value="name">По имени</option>
+          </NativeSelect>
+          <Button onClick={() => setAddOpen(true)}>
+            <Plus className="h-4 w-4" />
+            Новый клиент
+          </Button>
         </div>
       </div>
-      <div className="grid gap-3 xl:grid-cols-2">
-        {clients.length ? clients.map((client) => {
-          const sortedVisits = [...client.visits].sort((a, b) => b.date.localeCompare(a.date));
-          return (
-          <Card key={`${client.phone || client.name}-${client.cars[0] ?? ""}`}>
-            <CardHeader>
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <CardTitle>{client.name}</CardTitle>
-                  <p className="text-sm text-muted-foreground">{client.phone || "Телефон не указан"}</p>
-                </div>
-                <Badge className="shrink-0">{client.visits.length} визит{plural(client.visits.length)}</Badge>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex flex-wrap gap-2">
-                {client.cars.length ? client.cars.map((car) => <Badge key={car}>{car}</Badge>) : <span className="text-sm text-muted-foreground">Авто не указано</span>}
-              </div>
-              <div className="grid gap-3 sm:grid-cols-3">
-                <Info label="Всего" value={formatMoney(client.total)} />
-                <Info label="Оплачено" value={formatMoney(client.paid)} />
-                <Info label="Последний визит" value={client.lastVisit ? formatDate(client.lastVisit) : "—"} />
-              </div>
-              {client.upcoming.length > 0 && (
-                <div className="rounded-lg border border-blue-200 bg-blue-50/60 px-3 py-2 text-sm">
-                  <span className="font-medium text-blue-700">📅 Записан: </span>
-                  {client.upcoming
-                    .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`))
-                    .map((appointment) => `${formatDate(appointment.date)} в ${appointment.time} — ${appointment.plannedService}`)
-                    .join("; ")}
-                </div>
-              )}
-              <div className="space-y-2">
-                {sortedVisits.slice(0, 4).map((visit) => (
-                  <div key={visit.id} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2 text-sm">
-                    <span className="min-w-0 truncate">{formatDate(visit.date)} · {visit.works.map((work) => work.name).join(", ") || "—"}</span>
-                    <span className="shrink-0 font-medium">{formatMoney(visitTotal(visit))}</span>
-                  </div>
-                ))}
-                {sortedVisits.length > 4 && (
-                  <p className="text-xs text-muted-foreground">…и ещё {sortedVisits.length - 4} визит{plural(sortedVisits.length - 4)}</p>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-          );
-        }) : (
-          <EmptyState title="Клиенты не найдены" text="Измените поиск или добавьте заезд, чтобы карточка клиента появилась автоматически." />
-        )}
+
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Новый клиент</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Имя">
+                <Input value={addForm.name} onChange={(event) => setAddForm((current) => ({ ...current, name: event.target.value }))} />
+              </Field>
+              <Field label="Телефон">
+                <Input value={addForm.phone} onChange={(event) => setAddForm((current) => ({ ...current, phone: event.target.value }))} />
+              </Field>
+              <Field label="Автомобиль">
+                <Input value={addForm.car} onChange={(event) => setAddForm((current) => ({ ...current, car: event.target.value }))} />
+              </Field>
+              <Field label="Госномер">
+                <Input value={addForm.plate} onChange={(event) => setAddForm((current) => ({ ...current, plate: event.target.value }))} />
+              </Field>
+              <Field label="Пробег">
+                <Input value={addForm.mileage} onChange={(event) => setAddForm((current) => ({ ...current, mileage: event.target.value }))} />
+              </Field>
+              <Field label="VIN">
+                <Input value={addForm.vin} onChange={(event) => setAddForm((current) => ({ ...current, vin: event.target.value }))} />
+              </Field>
+            </div>
+            <Field label="Заметка">
+              <Textarea value={addForm.note} onChange={(event) => setAddForm((current) => ({ ...current, note: event.target.value }))} />
+            </Field>
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setAddOpen(false)}>Отмена</Button>
+              <Button onClick={saveNewClient}>Добавить клиента</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <StatCard label="Клиентов" value={totals.clients} />
+        <StatCard label="Визитов" value={totals.visits} />
+        <StatCard label="Оплачено" value={formatMoney(totals.paid)} />
+        <StatCard label="Долг" value={formatMoney(totals.unpaid)} />
+        <StatCard label="Записей" value={totals.upcoming} />
       </div>
+
+      <div className="flex flex-wrap gap-2">
+        {filters.map((item) => (
+          <Button
+            key={item.id}
+            variant={filter === item.id ? "default" : "secondary"}
+            size="sm"
+            onClick={() => setFilter(item.id)}
+          >
+            {item.label}
+          </Button>
+        ))}
+      </div>
+
+      {clients.length ? (
+        <div className="grid gap-5 xl:grid-cols-[420px_1fr]">
+          <div className="space-y-2">
+            {visibleClients.length ? visibleClients.map((client) => {
+              const isSelected = selectedClient?.key === client.key;
+              return (
+                <button
+                  key={client.key}
+                  className={`block w-full rounded-xl border p-4 text-left transition-all ${
+                    isSelected ? "border-blue-500 bg-blue-50/70 shadow-md shadow-blue-100" : "border-border/60 bg-white shadow-sm hover:border-blue-200 hover:shadow-md"
+                  }`}
+                  onClick={() => {
+                    setSelectedKey(client.key);
+                    setEditing(false);
+                  }}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate font-semibold">{client.name}</p>
+                      <p className="truncate text-sm text-muted-foreground">{client.phone || "Телефон не указан"}</p>
+                    </div>
+                    <div className="flex shrink-0 flex-col items-end gap-1">
+                      <Badge>{client.visits.length} визит{plural(client.visits.length)}</Badge>
+                      {client.unpaid > 0 && <Badge className="border-amber-200 bg-amber-50 text-amber-700">Долг</Badge>}
+                    </div>
+                  </div>
+                  <p className="mt-3 truncate text-sm text-muted-foreground">{client.cars.join("; ") || "Авто не указано"}</p>
+                  <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                    <div>
+                      <p className="uppercase text-muted-foreground">Всего</p>
+                      <p className="font-semibold">{formatMoney(client.total)}</p>
+                    </div>
+                    <div>
+                      <p className="uppercase text-muted-foreground">Долг</p>
+                      <p className={`font-semibold ${client.unpaid > 0 ? "text-amber-600" : ""}`}>{formatMoney(client.unpaid)}</p>
+                    </div>
+                    <div>
+                      <p className="uppercase text-muted-foreground">Активность</p>
+                      <p className="font-semibold">{client.lastVisit ? formatDate(client.lastVisit) : client.nextAppointment ? "Запись" : "—"}</p>
+                    </div>
+                  </div>
+                </button>
+              );
+            }) : (
+              <EmptyState title="Клиенты не найдены" text="Измените поиск или фильтр, чтобы увидеть карточки клиентов." />
+            )}
+          </div>
+
+          {selectedClient ? (
+            <Card>
+              <CardHeader>
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="min-w-0">
+                    <CardTitle>{selectedClient.name}</CardTitle>
+                    <p className="mt-1 text-sm text-muted-foreground">{selectedClient.phone || "Телефон не указан"}</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {selectedClient.unpaid > 0 && <Badge className="border-amber-200 bg-amber-50 text-amber-700">Есть долг</Badge>}
+                    {selectedClient.upcoming.length > 0 && <Badge className="border-blue-200 bg-blue-50 text-blue-700">Есть запись</Badge>}
+                    {(selectedClient.total >= 10000 || selectedClient.visits.length >= 3) && <Badge className="border-emerald-200 bg-emerald-50 text-emerald-700">Постоянный</Badge>}
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-5">
+                {editing ? (
+                  <div className="rounded-lg border border-border/60 bg-slate-50/70 p-4">
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <Field label="Имя">
+                        <Input value={editForm.name} onChange={(event) => setEditForm((current) => ({ ...current, name: event.target.value }))} />
+                      </Field>
+                      <Field label="Телефон">
+                        <Input value={editForm.phone} onChange={(event) => setEditForm((current) => ({ ...current, phone: event.target.value }))} />
+                      </Field>
+                    </div>
+                    <div className="mt-4">
+                      <Field label="Заметка">
+                        <Textarea value={editForm.note} onChange={(event) => setEditForm((current) => ({ ...current, note: event.target.value }))} />
+                      </Field>
+                    </div>
+                    <div className="mt-4 flex justify-end gap-2">
+                      <Button variant="secondary" onClick={() => {
+                        setEditForm({ name: selectedClient.name, phone: selectedClient.phone, note: selectedClient.note });
+                        setEditing(false);
+                      }}>Отмена</Button>
+                      <Button onClick={saveEdit}>Сохранить клиента</Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex justify-end">
+                    <Button variant="secondary" onClick={() => setEditing(true)}>Редактировать клиента</Button>
+                  </div>
+                )}
+
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <Info label="Всего" value={formatMoney(selectedClient.total)} />
+                  <Info label="Оплачено" value={formatMoney(selectedClient.paid)} />
+                  <Info label="Долг" value={formatMoney(selectedClient.unpaid)} />
+                  <Info label="Средний чек" value={formatMoney(selectedClient.average)} />
+                  <Info label="Первый визит" value={selectedClient.firstVisit ? formatDate(selectedClient.firstVisit) : "—"} />
+                  <Info label="Последний визит" value={selectedClient.lastVisit ? formatDate(selectedClient.lastVisit) : "—"} />
+                  <Info label="Визитов" value={`${selectedClient.visits.length}`} />
+                  <Info label="Авто" value={`${selectedClient.cars.length}`} />
+                </div>
+
+                <div>
+                  <h3 className="text-sm font-semibold text-muted-foreground">Автомобили</h3>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {selectedClient.cars.length ? selectedClient.cars.map((car) => <Badge key={car}>{car}</Badge>) : <span className="text-sm text-muted-foreground">Авто не указано</span>}
+                  </div>
+                </div>
+
+                {selectedClient.note && (
+                  <div className="rounded-lg border border-border/60 bg-slate-50/70 px-4 py-3 text-sm">
+                    <p className="text-xs font-medium uppercase text-muted-foreground">Заметка</p>
+                    <p className="mt-1">{selectedClient.note}</p>
+                  </div>
+                )}
+
+                {selectedClient.upcoming.length > 0 && (
+                  <div>
+                    <h3 className="text-sm font-semibold text-muted-foreground">Ближайшие записи</h3>
+                    <div className="mt-2 space-y-2">
+                      {[...selectedClient.upcoming]
+                        .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`))
+                        .map((appointment) => (
+                          <div key={appointment.id} className="rounded-lg border border-blue-200 bg-blue-50/60 px-3 py-2 text-sm">
+                            <p className="font-medium text-blue-700">{formatDate(appointment.date)} в {appointment.time}</p>
+                            <p className="text-muted-foreground">{appointment.car} {appointment.plate} · {appointment.plannedService}</p>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <h3 className="text-sm font-semibold text-muted-foreground">История визитов</h3>
+                  <div className="mt-2 space-y-2">
+                    {selectedClient.visits.length ? [...selectedClient.visits]
+                      .sort((a, b) => `${b.date} ${b.time}`.localeCompare(`${a.date} ${a.time}`))
+                      .map((visit) => (
+                        <div key={visit.id} className="grid gap-2 rounded-lg border border-border/60 px-3 py-2 text-sm lg:grid-cols-[1fr_auto] lg:items-center">
+                          <div className="min-w-0">
+                            <p className="font-medium">{formatDate(visit.date)}{visit.time ? `, ${visit.time}` : ""} · {visit.car} {visit.plate}</p>
+                            <p className="truncate text-muted-foreground">{visit.works.map((work) => work.name).join(", ") || "Работы не указаны"}</p>
+                          </div>
+                          <div className="flex items-center gap-2 lg:justify-end">
+                            <Badge className={isPaid(visit) ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}>
+                              {isPaid(visit) ? "Оплачен" : "Не оплачен"}
+                            </Badge>
+                            <span className="font-semibold">{formatMoney(visitTotal(visit))}</span>
+                          </div>
+                        </div>
+                      )) : (
+                        <p className="text-sm text-muted-foreground">У клиента пока нет завершённых визитов.</p>
+                      )}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ) : (
+            <EmptyState title="Выберите клиента" text="Карточка клиента откроется справа." />
+          )}
+        </div>
+      ) : (
+        <EmptyState title="Клиентов пока нет" text="Клиенты появятся после добавления заезда или активной записи." />
+      )}
     </div>
   );
 }
@@ -1975,8 +2695,12 @@ function OrderPrintSheet({ visit, company }: { visit: Visit; company: CompanySet
       <div className="flex flex-col gap-4 border-b border-slate-300 pb-5 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h2 className="text-xl font-bold">{company.name}</h2>
+          {company.legalName && <p className="mt-1 text-sm">{company.legalName}</p>}
           <p className="mt-1 text-sm">{company.address}</p>
           <p className="text-sm">{company.phone}</p>
+          {(company.email || company.website) && <p className="text-sm">{[company.email, company.website].filter(Boolean).join(" · ")}</p>}
+          {(company.taxId || company.registrationId) && <p className="text-sm">{[company.taxId ? `ИНН ${company.taxId}` : "", company.registrationId ? `ОГРН ${company.registrationId}` : ""].filter(Boolean).join(" · ")}</p>}
+          {company.workHours && <p className="text-sm">Режим работы: {company.workHours}</p>}
         </div>
         <div className="text-left sm:text-right">
           <p className="text-sm text-slate-500">Заказ-наряд</p>
@@ -2103,7 +2827,7 @@ function DaySummarySection({
             ) : (
               <p className="text-sm text-muted-foreground">В этот день работы мастеров не выполнялись.</p>
             )}
-            <p className="text-xs text-muted-foreground">Итоговый расчёт с мастерами (за всё время) — в разделе «Настройки».</p>
+            <p className="text-xs text-muted-foreground">Итоговый расчёт с сотрудниками (за всё время) — в разделе «Сотрудники».</p>
           </div>
         </>
       )}
@@ -2148,7 +2872,7 @@ function StatsSection({ visits, mechanics }: { visits: Visit[]; mechanics: Mecha
                     {mechanics.map((mechanic) => (
                       <div key={mechanic.id} className="flex justify-between gap-3">
                         <span>{mechanic.name}</span>
-                        <span className="font-medium">{formatMoney(sum(slice.filter((visit) => visit.mechanic === mechanic.name).map((visit) => visit.laborAmount)))}</span>
+                        <span className="font-medium">{formatMoney(sum(slice.filter((visit) => findMechanic(mechanics, visit)?.id === mechanic.id).map((visit) => visit.laborAmount)))}</span>
                       </div>
                     ))}
                   </div>
@@ -2168,6 +2892,550 @@ function StatsSection({ visits, mechanics }: { visits: Visit[]; mechanics: Mecha
   );
 }
 
+function EmployeesSection({
+  state,
+  setState
+}: {
+  state: AppState;
+  setState: React.Dispatch<React.SetStateAction<AppState>>;
+}) {
+  const [newMechanic, setNewMechanic] = useState("");
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileDraft, setProfileDraft] = useState({ name: "", percent: "", paid: "" });
+  const [selectedId, setSelectedId] = useState("");
+  const [period, setPeriod] = useState("month");
+  const [fromDate, setFromDate] = useState(addDays(-29));
+  const [toDate, setToDate] = useState(todayIsoDate());
+  const [paymentAmount, setPaymentAmount] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("Наличные");
+  const [paymentComment, setPaymentComment] = useState("");
+
+  const periodRange = useMemo(() => {
+    const today = todayIsoDate();
+    if (period === "today") return { from: today, to: today, label: "сегодня" };
+    if (period === "week") return { from: addDays(-6), to: today, label: "7 дней" };
+    if (period === "month") return { from: addDays(-29), to: today, label: "30 дней" };
+    if (period === "custom") return { from: fromDate, to: toDate, label: "период" };
+    return { from: "", to: "", label: "всё время" };
+  }, [fromDate, period, toDate]);
+
+  const visitsInPeriod = useMemo(() => {
+    if (period === "all") return state.visits;
+    return state.visits.filter((visit) => visit.date >= periodRange.from && visit.date <= periodRange.to);
+  }, [period, periodRange.from, periodRange.to, state.visits]);
+
+  const paymentsInPeriod = useMemo(() => {
+    if (period === "all") return state.payrollPayments;
+    return state.payrollPayments.filter((payment) => payment.date >= periodRange.from && payment.date <= periodRange.to);
+  }, [period, periodRange.from, periodRange.to, state.payrollPayments]);
+
+  const settlement = useMemo(() => buildMechanicSettlement(state.visits, state.mechanics), [state.visits, state.mechanics]);
+  const settlementById = new Map(settlement.map((row) => [row.id, row]));
+  const employeeRows = state.mechanics.map((mechanic) => {
+    const periodVisits = visitsInPeriod.filter((visit) => findMechanic(state.mechanics, visit)?.id === mechanic.id);
+    const periodLabor = sum(periodVisits.map((visit) => visit.laborAmount));
+    const periodAccrued = Math.round((periodLabor * mechanic.percent) / 100);
+    const periodPaid = sum(paymentsInPeriod.filter((payment) => payment.mechanicId === mechanic.id).map((payment) => payment.amount));
+    const all = settlementById.get(mechanic.id);
+
+    return {
+      id: mechanic.id,
+      name: mechanic.name,
+      percent: mechanic.percent,
+      periodVisits,
+      periodWorks: periodVisits.length,
+      periodLabor,
+      periodAccrued,
+      periodPaid,
+      allAccrued: all?.accrued ?? 0,
+      allPaid: all?.paid ?? mechanic.paid,
+      balance: all?.balance ?? 0
+    };
+  });
+  const sortedEmployeeRows = [...employeeRows].sort((a, b) => {
+    if (b.balance !== a.balance) return b.balance - a.balance;
+    if (b.periodAccrued !== a.periodAccrued) return b.periodAccrued - a.periodAccrued;
+    return a.name.localeCompare(b.name);
+  });
+
+  const totals = {
+    periodWorks: sum(employeeRows.map((row) => row.periodWorks)),
+    periodLabor: sum(employeeRows.map((row) => row.periodLabor)),
+    periodAccrued: sum(employeeRows.map((row) => row.periodAccrued)),
+    periodPaid: sum(employeeRows.map((row) => row.periodPaid)),
+    allBalance: sum(employeeRows.map((row) => row.balance)),
+    payoutDue: sum(employeeRows.map((row) => Math.max(0, row.balance))),
+    peopleDue: employeeRows.filter((row) => row.balance > 0).length
+  };
+  const selected = (selectedId ? employeeRows.find((row) => row.id === selectedId) : undefined) ?? sortedEmployeeRows[0] ?? employeeRows[0];
+  const selectedMechanic = selected ? state.mechanics.find((mechanic) => mechanic.id === selected.id) : undefined;
+  const selectedTimeline = useMemo(() => {
+    if (!selected) return [];
+
+    const mechanicPayments = state.payrollPayments.filter((payment) => payment.mechanicId === selected.id);
+    const loggedPaid = sum(mechanicPayments.map((payment) => payment.amount));
+    const legacyPaid = Math.max(0, selected.allPaid - loggedPaid);
+    type PayrollTimelineEvent = {
+      id: string;
+      kind: "accrual" | "payment";
+      date: string;
+      time: string;
+      sortKey: string;
+      title: string;
+      meta: string;
+      amount: number;
+    };
+    const events: PayrollTimelineEvent[] = [
+      ...state.visits
+        .filter((visit) => findMechanic(state.mechanics, visit)?.id === selected.id)
+        .map((visit) => ({
+          id: `visit-${visit.id}`,
+          kind: "accrual" as const,
+          date: visit.date,
+          time: visit.time,
+          sortKey: `${visit.date} ${visit.time || "00:00"} visit-${visit.id}`,
+          title: visit.works.map((work) => work.name).join(", ") || "Работы",
+          meta: `${visit.car}${visit.plate ? ` ${visit.plate}` : ""}`,
+          amount: visitMechanicAccrued(visit, state.mechanics)
+        })),
+      ...mechanicPayments.map((payment) => ({
+        id: `payment-${payment.id}`,
+        kind: "payment" as const,
+        date: payment.date,
+        time: "",
+        sortKey: `${payment.date} 23:59 payment-${payment.id}`,
+        title: payment.comment || "Выплата",
+        meta: payment.method,
+        amount: -payment.amount
+      }))
+    ];
+
+    if (legacyPaid > 0) {
+      events.push({
+        id: `legacy-${selected.id}`,
+        kind: "payment" as const,
+        date: "",
+        time: "",
+        sortKey: `0000-00-00 00:00 legacy-${selected.id}`,
+        title: "Ранее выдано",
+        meta: "Перенесённая сумма",
+        amount: -legacyPaid
+      });
+    }
+
+    let balance = 0;
+    return events
+      .sort((a, b) => a.sortKey.localeCompare(b.sortKey))
+      .map((event) => {
+        balance += event.amount;
+        return { ...event, balanceAfter: balance };
+      })
+      .reverse();
+  }, [selected, state.mechanics, state.payrollPayments, state.visits]);
+  const selectedHasVisits = selected
+    ? state.visits.some((visit) => visit.mechanicId === selected.id || findMechanic(state.mechanics, visit)?.id === selected.id)
+    : false;
+
+  const updateMechanic = (id: string, patch: Partial<Mechanic>) =>
+    setState((current) => {
+      const currentMechanic = current.mechanics.find((item) => item.id === id);
+      const nextName = patch.name?.trim();
+      const mechanics = current.mechanics.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              ...patch,
+              name: nextName ?? patch.name ?? item.name,
+              percent: patch.percent === undefined ? item.percent : Math.min(100, Math.max(0, patch.percent)),
+              paid: patch.paid === undefined ? item.paid : Math.max(0, patch.paid)
+            }
+          : item
+      );
+
+      return {
+        ...current,
+        mechanics,
+        visits: nextName && currentMechanic
+          ? current.visits.map((visit) =>
+              visit.mechanicId === id || visit.mechanic === currentMechanic.name
+                ? { ...visit, mechanicId: id, mechanic: nextName }
+                : visit
+            )
+          : current.visits
+      };
+    });
+
+  const addMechanic = () => {
+    const name = newMechanic.trim();
+    if (!name) return;
+    const nextId = nextMechanicId(state.mechanics);
+    setState((current) =>
+      current.mechanics.some((mechanic) => mechanic.name.toLowerCase() === name.toLowerCase())
+        ? current
+        : {
+            ...current,
+            mechanics: [
+              ...current.mechanics,
+              { id: nextId, name, percent: current.preferences.defaultMechanicPercent, paid: 0 }
+            ]
+          }
+    );
+    setSelectedId(nextId);
+    setNewMechanic("");
+    setAddDialogOpen(false);
+  };
+
+  const removeMechanic = (id: string) =>
+    setState((current) => {
+      const hasVisits = current.visits.some((visit) => visit.mechanicId === id || findMechanic(current.mechanics, visit)?.id === id);
+      if (hasVisits) return current;
+      return { ...current, mechanics: current.mechanics.filter((item) => item.id !== id) };
+    });
+
+  const registerPayment = (mechanicId: string, amount: number, comment = paymentComment) => {
+    if (amount <= 0) return;
+    setState((current) => ({
+      ...current,
+      payrollPayments: [
+        {
+          id: nextPayrollPaymentId(current.payrollPayments),
+          mechanicId,
+          date: todayIsoDate(),
+          amount,
+          method: paymentMethod,
+          comment: comment.trim()
+        },
+        ...current.payrollPayments
+      ],
+      mechanics: current.mechanics.map((mechanic) =>
+        mechanic.id === mechanicId ? { ...mechanic, paid: mechanic.paid + amount } : mechanic
+      )
+    }));
+    setPaymentAmount("");
+    setPaymentComment("");
+  };
+
+  const chooseEmployee = (id: string, balance: number) => {
+    setSelectedId(id);
+    setPaymentAmount(balance > 0 ? String(balance) : "");
+  };
+
+  const openProfile = () => {
+    if (!selectedMechanic) return;
+    setProfileDraft({
+      name: selectedMechanic.name,
+      percent: String(selectedMechanic.percent),
+      paid: String(selectedMechanic.paid)
+    });
+    setProfileOpen(true);
+  };
+
+  const saveProfile = () => {
+    if (!selectedMechanic) return;
+    updateMechanic(selectedMechanic.id, {
+      name: profileDraft.name,
+      percent: Number(profileDraft.percent) || 0,
+      paid: Number(profileDraft.paid) || 0
+    });
+    setProfileOpen(false);
+  };
+
+  const deleteSelectedMechanic = () => {
+    if (!selectedMechanic || selectedHasVisits) return;
+    const nextSelected = state.mechanics.find((mechanic) => mechanic.id !== selectedMechanic.id)?.id ?? "";
+    removeMechanic(selectedMechanic.id);
+    setSelectedId(nextSelected);
+    setProfileOpen(false);
+  };
+
+  const formatSignedMoney = (value: number) => {
+    if (value > 0) return `+${formatMoney(value)}`;
+    if (value < 0) return `-${formatMoney(Math.abs(value))}`;
+    return formatMoney(0);
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Зарплата</h2>
+          <p className="text-sm text-muted-foreground">Очередь выплат, быстрый расчёт и лента движений по сотрудникам.</p>
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <NativeSelect value={period} onChange={(event) => setPeriod(event.target.value)} className="sm:w-36">
+            <option value="today">Сегодня</option>
+            <option value="week">7 дней</option>
+            <option value="month">30 дней</option>
+            <option value="all">Всё время</option>
+            <option value="custom">Период</option>
+          </NativeSelect>
+          {period === "custom" && (
+            <>
+              <Input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} className="sm:w-36" />
+              <Input type="date" value={toDate} onChange={(event) => setToDate(event.target.value)} className="sm:w-36" />
+            </>
+          )}
+          <Button variant="secondary" onClick={() => setAddDialogOpen(true)}>
+            <Plus className="h-4 w-4" />
+            Сотрудник
+          </Button>
+        </div>
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-[minmax(0,1.4fr)_minmax(220px,.6fr)_minmax(220px,.6fr)]">
+        <div className="rounded-xl border border-border/60 bg-white p-5 shadow-sm">
+          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">К выплате сейчас</p>
+          <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <p className="text-3xl font-semibold tracking-tight">{formatMoney(totals.payoutDue)}</p>
+            <Badge className="w-fit border-amber-200 bg-amber-50 text-amber-700">
+              {totals.peopleDue ? `${totals.peopleDue} к выплате` : "очередь пуста"}
+            </Badge>
+          </div>
+        </div>
+        <div className="rounded-xl border border-border/60 bg-white p-5 shadow-sm">
+          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Начислено за {periodRange.label}</p>
+          <p className="mt-2 text-2xl font-semibold tracking-tight">{formatMoney(totals.periodAccrued)}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{totals.periodWorks} работ</p>
+        </div>
+        <div className="rounded-xl border border-border/60 bg-white p-5 shadow-sm">
+          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Выплачено за {periodRange.label}</p>
+          <p className="mt-2 text-2xl font-semibold tracking-tight">{formatMoney(totals.periodPaid)}</p>
+          <p className="mt-1 text-sm text-muted-foreground">Баланс всего: {formatMoney(totals.allBalance)}</p>
+        </div>
+      </div>
+
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_430px]">
+        <section className="overflow-hidden rounded-xl border border-border/60 bg-white shadow-sm">
+          <div className="grid grid-cols-[1fr_auto] gap-3 border-b border-border/60 px-4 py-3">
+            <div>
+              <h3 className="font-semibold">Очередь выплат</h3>
+              <p className="text-sm text-muted-foreground">Сначала сотрудники с самым большим остатком.</p>
+            </div>
+            <Badge>{sortedEmployeeRows.length}</Badge>
+          </div>
+          <div className="divide-y divide-border/50">
+          {sortedEmployeeRows.length ? sortedEmployeeRows.map((row) => {
+            const active = selected?.id === row.id;
+            return (
+              <div
+                key={row.id}
+                className={cn(
+                  "grid gap-3 px-4 py-3 transition-colors md:grid-cols-[minmax(0,1fr)_150px_132px] md:items-center",
+                  active ? "bg-blue-50/70" : "hover:bg-slate-50/70"
+                )}
+              >
+                <button className="min-w-0 text-left" onClick={() => chooseEmployee(row.id, row.balance)}>
+                  <div className="flex items-center gap-3">
+                    <span className={cn("h-2.5 w-2.5 rounded-full", row.balance > 0 ? "bg-amber-400" : row.balance < 0 ? "bg-red-400" : "bg-emerald-400")} />
+                    <div className="min-w-0">
+                      <p className="truncate font-medium">{row.name}</p>
+                      <p className="truncate text-sm text-muted-foreground">
+                        {row.percent}% · {row.periodWorks ? `${row.periodWorks} работ за ${periodRange.label}` : "без работ за период"}
+                      </p>
+                    </div>
+                  </div>
+                </button>
+                <button className="text-left md:text-right" onClick={() => chooseEmployee(row.id, row.balance)}>
+                  <p className={cn("text-lg font-semibold tracking-tight", row.balance > 0 ? "text-amber-700" : row.balance < 0 ? "text-red-600" : "text-emerald-700")}>
+                    {formatMoney(row.balance)}
+                  </p>
+                  <p className="text-xs text-muted-foreground">остаток</p>
+                </button>
+                <Button
+                  variant={row.balance > 0 ? "default" : "secondary"}
+                  disabled={row.balance <= 0}
+                  onClick={() => {
+                    chooseEmployee(row.id, row.balance);
+                    registerPayment(row.id, row.balance, "Закрытие остатка");
+                  }}
+                >
+                  Выплатить
+                </Button>
+              </div>
+            );
+          }) : (
+            <EmptyState title="Сотрудников пока нет" text="Добавьте первого сотрудника, чтобы вести расчёты." />
+          )}
+          </div>
+        </section>
+
+        {selected && selectedMechanic ? (
+          <aside className="space-y-5">
+            <section className="rounded-xl border border-border/60 bg-white p-5 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm text-muted-foreground">Выбран сотрудник</p>
+                  <h3 className="text-xl font-semibold tracking-tight">{selected.name}</h3>
+                </div>
+                <Button variant="secondary" size="icon" onClick={openProfile} title="Настройки сотрудника">
+                  <Settings className="h-4 w-4" />
+                </Button>
+              </div>
+              <div className="mt-5 rounded-lg border border-border/60 bg-slate-50/70 p-4">
+                <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Остаток к выплате</p>
+                <p className={cn("mt-2 text-3xl font-semibold tracking-tight", selected.balance > 0 ? "text-amber-700" : selected.balance < 0 ? "text-red-600" : "text-emerald-700")}>
+                  {formatMoney(selected.balance)}
+                </p>
+              </div>
+
+              <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
+                <Info label="Начислено" value={formatMoney(selected.periodAccrued)} />
+                <Info label="Выплачено" value={formatMoney(selected.periodPaid)} />
+                <Info label="Работ" value={`${selected.periodWorks}`} />
+              </div>
+
+              <div className="mt-5 space-y-3">
+                <div className="grid gap-3 sm:grid-cols-[1fr_150px]">
+                  <Field label="Сумма выплаты">
+                    <Input
+                      type="number"
+                      min={0}
+                      value={paymentAmount}
+                      placeholder={selected.balance > 0 ? String(selected.balance) : "0"}
+                      onChange={(event) => setPaymentAmount(event.target.value)}
+                    />
+                  </Field>
+                  <Field label="Способ">
+                    <NativeSelect value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as PaymentMethod)}>
+                      {paymentMethods.filter((method) => method !== "Не оплачено").map((method) => <option key={method} value={method}>{method}</option>)}
+                    </NativeSelect>
+                  </Field>
+                </div>
+                <Field label="Комментарий">
+                  <Input value={paymentComment} onChange={(event) => setPaymentComment(event.target.value)} placeholder="Аванс, зарплата, корректировка" />
+                </Field>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <Button
+                    variant="secondary"
+                    disabled={selected.balance <= 0}
+                    onClick={() => {
+                      setPaymentAmount(String(Math.max(0, selected.balance)));
+                      registerPayment(selected.id, Math.max(0, selected.balance), paymentComment || "Закрытие остатка");
+                    }}
+                  >
+                    Весь остаток
+                  </Button>
+                  <Button onClick={() => registerPayment(selected.id, Number(paymentAmount) || 0)}>
+                    Записать выплату
+                  </Button>
+                </div>
+              </div>
+            </section>
+
+            <section className="rounded-xl border border-border/60 bg-white p-5 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="font-semibold">Лента расчётов</h3>
+                  <p className="text-sm text-muted-foreground">{selectedTimeline.length} операций</p>
+                </div>
+                <Badge>{selected.percent}%</Badge>
+              </div>
+              <div className="mt-4 max-h-[520px] space-y-3 overflow-auto pr-1">
+                {selectedTimeline.length ? selectedTimeline.slice(0, 24).map((event) => (
+                  <div key={event.id} className="grid grid-cols-[18px_1fr] gap-3 text-sm">
+                    <div className="flex flex-col items-center">
+                      <span className={cn("mt-1 h-2.5 w-2.5 rounded-full", event.kind === "accrual" ? "bg-blue-500" : "bg-emerald-500")} />
+                      <span className="mt-1 h-full w-px bg-border" />
+                    </div>
+                    <div className="pb-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate font-medium">{event.title}</p>
+                          <p className="truncate text-xs text-muted-foreground">
+                            {event.date ? formatDate(event.date) : "Ранее"}{event.time ? ` · ${event.time}` : ""} · {event.meta}
+                          </p>
+                        </div>
+                        <p className={cn("shrink-0 font-semibold", event.kind === "accrual" ? "text-blue-700" : "text-emerald-700")}>
+                          {formatSignedMoney(event.amount)}
+                        </p>
+                      </div>
+                      <p className="mt-1 text-xs text-muted-foreground">Баланс после: {formatMoney(event.balanceAfter)}</p>
+                    </div>
+                  </div>
+                )) : (
+                  <p className="text-sm text-muted-foreground">Движений пока нет.</p>
+                )}
+              </div>
+            </section>
+          </aside>
+        ) : (
+          <EmptyState title="Сотрудников пока нет" text="Добавьте первого сотрудника, чтобы вести расчёты." />
+        )}
+      </div>
+
+      <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Новый сотрудник</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <Field label="Имя">
+              <Input
+                value={newMechanic}
+                placeholder="Например, Алексей"
+                onChange={(event) => setNewMechanic(event.target.value)}
+                onKeyDown={(event) => event.key === "Enter" && addMechanic()}
+              />
+            </Field>
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setAddDialogOpen(false)}>Отмена</Button>
+              <Button onClick={addMechanic}>Добавить</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={profileOpen} onOpenChange={setProfileOpen}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Профиль сотрудника</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-[1fr_120px_150px]">
+              <Field label="Имя">
+                <Input value={profileDraft.name} onChange={(event) => setProfileDraft((draft) => ({ ...draft, name: event.target.value }))} />
+              </Field>
+              <Field label="Процент">
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={profileDraft.percent}
+                  onChange={(event) => setProfileDraft((draft) => ({ ...draft, percent: event.target.value }))}
+                />
+              </Field>
+              <Field label="Выдано всего">
+                <Input
+                  type="number"
+                  min={0}
+                  value={profileDraft.paid}
+                  onChange={(event) => setProfileDraft((draft) => ({ ...draft, paid: event.target.value }))}
+                />
+              </Field>
+            </div>
+            <div className="flex flex-col gap-2 border-t border-border/60 pt-4 sm:flex-row sm:items-center sm:justify-between">
+              <Button
+                variant="secondary"
+                className="text-red-500 hover:bg-red-50 hover:text-red-600"
+                disabled={selectedHasVisits}
+                onClick={deleteSelectedMechanic}
+              >
+                <Trash2 className="h-4 w-4" />
+                Удалить
+              </Button>
+              <div className="flex justify-end gap-2">
+                <Button variant="secondary" onClick={() => setProfileOpen(false)}>Отмена</Button>
+                <Button onClick={saveProfile}>Сохранить</Button>
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
 function nextMechanicId(mechanics: Mechanic[]) {
   const max = mechanics.reduce((acc, mechanic) => {
     const num = Number(mechanic.id.replace(/\D/g, ""));
@@ -2183,60 +3451,143 @@ function SettingsSection({
   state: AppState;
   setState: React.Dispatch<React.SetStateAction<AppState>>;
 }) {
-  const [newService, setNewService] = useState("");
+  const [newService, setNewService] = useState({ name: "", price: "", category: "Общие" });
   const [newMechanic, setNewMechanic] = useState("");
-  const settlement = useMemo(() => buildMechanicSettlement(state.visits, state.mechanics), [state.visits, state.mechanics]);
+  const preferences = state.preferences;
 
   const updateMechanic = (id: string, patch: Partial<Mechanic>) =>
-    setState((current) => ({
-      ...current,
-      mechanics: current.mechanics.map((item) => (item.id === id ? { ...item, ...patch } : item))
-    }));
+    setState((current) => {
+      const currentMechanic = current.mechanics.find((item) => item.id === id);
+      const nextName = patch.name?.trim();
+      return {
+        ...current,
+        mechanics: current.mechanics.map((item) =>
+          item.id === id
+            ? {
+                ...item,
+                ...patch,
+                percent: patch.percent === undefined ? item.percent : Math.min(100, Math.max(0, patch.percent)),
+                paid: patch.paid === undefined ? item.paid : Math.max(0, patch.paid)
+              }
+            : item
+        ),
+        visits: nextName && currentMechanic
+          ? current.visits.map((visit) =>
+              visit.mechanicId === id || visit.mechanic === currentMechanic.name
+                ? { ...visit, mechanicId: id, mechanic: nextName }
+                : visit
+            )
+          : current.visits
+      };
+    });
 
   const addMechanic = () => {
     const name = newMechanic.trim();
     if (!name) return;
     setState((current) => ({
       ...current,
-      mechanics: [...current.mechanics, { id: nextMechanicId(current.mechanics), name, percent: 40, paid: 0 }]
+      mechanics: [
+        ...current.mechanics,
+        {
+          id: nextMechanicId(current.mechanics),
+          name,
+          percent: current.preferences.defaultMechanicPercent,
+          paid: 0
+        }
+      ]
     }));
     setNewMechanic("");
   };
 
   const removeMechanic = (id: string) =>
-    setState((current) => ({ ...current, mechanics: current.mechanics.filter((item) => item.id !== id) }));
+    setState((current) => {
+      const hasVisits = current.visits.some((visit) => visit.mechanicId === id || findMechanic(current.mechanics, visit)?.id === id);
+      if (hasVisits) return current;
+      return { ...current, mechanics: current.mechanics.filter((item) => item.id !== id) };
+    });
 
   const addService = () => {
-    const name = newService.trim();
+    const name = newService.name.trim();
     if (!name) return;
-    setState((current) =>
-      current.services.includes(name) ? current : { ...current, services: [...current.services, name] }
-    );
-    setNewService("");
+    setState((current) => {
+      const exists = current.services.some((service) => service.name.toLowerCase() === name.toLowerCase());
+      if (exists) return current;
+      return {
+        ...current,
+        services: [
+          ...current.services,
+          {
+            id: nextServiceId(current.services),
+            name,
+            price: Math.max(0, Number(newService.price) || 0),
+            category: newService.category.trim() || "Общие"
+          }
+        ]
+      };
+    });
+    setNewService({ name: "", price: "", category: "Общие" });
   };
 
-  const removeService = (name: string) =>
-    setState((current) => ({ ...current, services: current.services.filter((item) => item !== name) }));
+  const updateService = (id: string, patch: Partial<ServiceItem>) =>
+    setState((current) => ({
+      ...current,
+      services: current.services.map((service) =>
+        service.id === id
+          ? {
+              ...service,
+              ...patch,
+              price: patch.price === undefined ? service.price : Math.max(0, patch.price),
+              category: patch.category === undefined ? service.category : patch.category || "Общие"
+            }
+          : service
+      )
+    }));
+
+  const removeService = (id: string) =>
+    setState((current) => ({ ...current, services: current.services.filter((item) => item.id !== id) }));
+
+  const updateCompany = (patch: Partial<CompanySettings>) =>
+    setState((current) => ({ ...current, company: { ...current.company, ...patch } }));
+
+  const updatePreferences = (patch: Partial<AppPreferences>) =>
+    setState((current) => ({
+      ...current,
+      preferences: { ...current.preferences, ...patch }
+    }));
 
   return (
     <div className="space-y-5">
-      <h2 className="text-2xl font-semibold">Настройки</h2>
-      <div className="grid gap-5 xl:grid-cols-2">
-        <Card>
-          <CardHeader><CardTitle>Мастера</CardTitle></CardHeader>
-          <CardContent className="space-y-3">
-            <div className="hidden gap-3 px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground sm:grid sm:grid-cols-[1fr_96px_40px]">
-              <span>Имя</span>
-              <span>Процент</span>
-              <span></span>
-            </div>
-            {state.mechanics.map((mechanic) => (
-              <div key={mechanic.id} className="grid gap-3 sm:grid-cols-[1fr_96px_40px] sm:items-center">
-                <Input
-                  value={mechanic.name}
-                  onChange={(event) => updateMechanic(mechanic.id, { name: event.target.value })}
-                />
-                <div className="relative">
+      <div>
+        <h2 className="text-2xl font-semibold">Настройки</h2>
+        <p className="text-sm text-muted-foreground">Справочники, реквизиты и рабочие правила автосервиса.</p>
+      </div>
+
+      <Tabs defaultValue="mechanics" className="space-y-5">
+        <TabsList className="w-full justify-start overflow-x-auto sm:w-auto">
+          <TabsTrigger value="mechanics">Мастера</TabsTrigger>
+          <TabsTrigger value="services">Услуги</TabsTrigger>
+          <TabsTrigger value="company">Реквизиты</TabsTrigger>
+          <TabsTrigger value="rules">Правила</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="mechanics">
+          <Card>
+            <CardHeader>
+              <CardTitle>Настройки мастеров</CardTitle>
+              <p className="text-sm text-muted-foreground">Имена и процент начисления. Зарплаты и остатки вынесены в раздел «Сотрудники».</p>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="hidden gap-3 px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground sm:grid sm:grid-cols-[1fr_120px_40px]">
+                <span>Имя</span>
+                <span>Процент</span>
+                <span></span>
+              </div>
+              {state.mechanics.map((mechanic) => (
+                <div key={mechanic.id} className="grid gap-3 sm:grid-cols-[1fr_120px_40px] sm:items-center">
+                  <Input
+                    value={mechanic.name}
+                    onChange={(event) => updateMechanic(mechanic.id, { name: event.target.value })}
+                  />
                   <Input
                     type="number"
                     min={0}
@@ -2244,113 +3595,175 @@ function SettingsSection({
                     value={mechanic.percent}
                     onChange={(event) => updateMechanic(mechanic.id, { percent: Math.min(100, Math.max(0, Number(event.target.value) || 0)) })}
                   />
+                  <Button variant="secondary" size="sm" className="h-9 w-9 p-0 text-red-500 hover:bg-red-50 hover:text-red-600" onClick={() => removeMechanic(mechanic.id)} title="Удалить мастера">
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
                 </div>
-                <Button variant="secondary" size="sm" className="h-9 w-9 p-0 text-red-500 hover:bg-red-50 hover:text-red-600" onClick={() => removeMechanic(mechanic.id)} title="Удалить мастера">
-                  <Trash2 className="h-4 w-4" />
+              ))}
+              <div className="grid gap-2 pt-2 sm:grid-cols-[1fr_140px_auto]">
+                <Input
+                  value={newMechanic}
+                  placeholder="Имя нового мастера"
+                  onChange={(event) => setNewMechanic(event.target.value)}
+                  onKeyDown={(event) => event.key === "Enter" && addMechanic()}
+                />
+                <div className="rounded-lg border border-border bg-slate-50 px-3 py-2 text-sm text-muted-foreground">
+                  {preferences.defaultMechanicPercent}% по умолчанию
+                </div>
+                <Button variant="secondary" onClick={addMechanic}>
+                  <Plus className="h-4 w-4" />
+                  Добавить
                 </Button>
               </div>
-            ))}
-            <div className="flex gap-2 pt-1">
-              <Input
-                value={newMechanic}
-                placeholder="Имя нового мастера"
-                onChange={(event) => setNewMechanic(event.target.value)}
-                onKeyDown={(event) => event.key === "Enter" && addMechanic()}
-              />
-              <Button variant="secondary" onClick={addMechanic}>
-                <Plus className="h-4 w-4" />
-                Добавить
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+        </TabsContent>
 
-        <Card>
-          <CardHeader><CardTitle>Типовые услуги</CardTitle></CardHeader>
-          <CardContent className="space-y-3">
-            <div className="flex flex-wrap gap-2">
+        <TabsContent value="services">
+          <Card>
+            <CardHeader>
+              <CardTitle>Справочник услуг</CardTitle>
+              <p className="text-sm text-muted-foreground">Цена подставляется в новый заезд при выборе услуги из списка.</p>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="hidden gap-3 px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground lg:grid lg:grid-cols-[1.4fr_160px_180px_40px]">
+                <span>Услуга</span>
+                <span>Цена</span>
+                <span>Категория</span>
+                <span></span>
+              </div>
               {state.services.map((service) => (
-                <span key={service} className="inline-flex items-center gap-1.5 rounded-full border border-border bg-slate-50 py-1 pl-3 pr-1.5 text-sm">
-                  {service}
-                  <button className="flex h-5 w-5 items-center justify-center rounded-full text-muted-foreground hover:bg-red-100 hover:text-red-600" onClick={() => removeService(service)} title="Удалить">
-                    ×
-                  </button>
-                </span>
+                <div key={service.id} className="grid gap-3 lg:grid-cols-[1.4fr_160px_180px_40px] lg:items-center">
+                  <Input value={service.name} onChange={(event) => updateService(service.id, { name: event.target.value })} />
+                  <Input
+                    type="number"
+                    min={0}
+                    value={service.price}
+                    onChange={(event) => updateService(service.id, { price: Number(event.target.value) || 0 })}
+                  />
+                  <Input value={service.category} onChange={(event) => updateService(service.id, { category: event.target.value })} />
+                  <Button variant="secondary" size="sm" className="h-9 w-9 p-0 text-red-500 hover:bg-red-50 hover:text-red-600" onClick={() => removeService(service.id)} title="Удалить услугу">
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
               ))}
-              {!state.services.length && <span className="text-sm text-muted-foreground">Услуги не добавлены</span>}
-            </div>
-            <div className="flex gap-2">
-              <Input
-                value={newService}
-                placeholder="Новая услуга"
-                onChange={(event) => setNewService(event.target.value)}
-                onKeyDown={(event) => event.key === "Enter" && addService()}
-              />
-              <Button variant="secondary" onClick={addService}>
-                <Plus className="h-4 w-4" />
-                Добавить
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+              {!state.services.length && <p className="text-sm text-muted-foreground">Услуги не добавлены.</p>}
+              <div className="grid gap-2 border-t border-border/60 pt-4 lg:grid-cols-[1.4fr_160px_180px_auto]">
+                <Input
+                  value={newService.name}
+                  placeholder="Новая услуга"
+                  onChange={(event) => setNewService((current) => ({ ...current, name: event.target.value }))}
+                  onKeyDown={(event) => event.key === "Enter" && addService()}
+                />
+                <Input
+                  type="number"
+                  min={0}
+                  value={newService.price}
+                  placeholder="Цена"
+                  onChange={(event) => setNewService((current) => ({ ...current, price: event.target.value }))}
+                />
+                <Input
+                  value={newService.category}
+                  placeholder="Категория"
+                  onChange={(event) => setNewService((current) => ({ ...current, category: event.target.value }))}
+                />
+                <Button variant="secondary" onClick={addService}>
+                  <Plus className="h-4 w-4" />
+                  Добавить
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
 
-        <Card className="xl:col-span-2">
-          <CardHeader>
-            <CardTitle>Расчёт с мастерами</CardTitle>
-            <p className="text-sm text-muted-foreground">Начислено по всем заездам за всё время минус уже выданное.</p>
-          </CardHeader>
-          <CardContent className="overflow-x-auto p-0">
-            <table className="w-full min-w-[640px] border-collapse text-sm">
-              <thead>
-                <tr className="border-y border-border/60 text-left">
-                  {["Мастер", "Заездов", "Начислено всего", "Выдано", "Остаток", ""].map((header) => (
-                    <th key={header} className="px-5 py-3 text-xs font-medium uppercase tracking-wider text-muted-foreground">{header}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {settlement.map((row) => (
-                  <tr key={row.id} className="border-b border-border/40 last:border-b-0">
-                    <td className="px-5 py-3 font-medium">{row.mechanic}</td>
-                    <td className="px-5 py-3">{row.works}</td>
-                    <td className="px-5 py-3">{formatMoney(row.accrued)}</td>
-                    <td className="px-5 py-3">
-                      <Input
-                        type="number"
-                        min={0}
-                        value={row.paid}
-                        className="h-8 w-28"
-                        onChange={(event) => updateMechanic(row.id, { paid: Math.max(0, Number(event.target.value) || 0) })}
-                      />
-                    </td>
-                    <td className={`px-5 py-3 font-semibold ${row.balance > 0 ? "text-amber-600" : "text-emerald-600"}`}>{formatMoney(row.balance)}</td>
-                    <td className="px-5 py-3 text-right">
-                      <Button size="sm" variant="secondary" disabled={row.balance <= 0} onClick={() => updateMechanic(row.id, { paid: row.accrued })}>
-                        Выдать остаток
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </CardContent>
-        </Card>
+        <TabsContent value="company">
+          <Card>
+            <CardHeader>
+              <CardTitle>Реквизиты автосервиса</CardTitle>
+              <p className="text-sm text-muted-foreground">Эти данные используются в заказ-нарядах и печатных документах.</p>
+            </CardHeader>
+            <CardContent className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              <Field label="Название">
+                <Input value={state.company.name} onChange={(event) => updateCompany({ name: event.target.value })} />
+              </Field>
+              <Field label="Юридическое название">
+                <Input value={state.company.legalName ?? ""} onChange={(event) => updateCompany({ legalName: event.target.value })} />
+              </Field>
+              <Field label="Телефон">
+                <Input value={state.company.phone} onChange={(event) => updateCompany({ phone: event.target.value })} />
+              </Field>
+              <Field label="Адрес">
+                <Input value={state.company.address} onChange={(event) => updateCompany({ address: event.target.value })} />
+              </Field>
+              <Field label="Email">
+                <Input value={state.company.email ?? ""} onChange={(event) => updateCompany({ email: event.target.value })} />
+              </Field>
+              <Field label="Сайт">
+                <Input value={state.company.website ?? ""} onChange={(event) => updateCompany({ website: event.target.value })} />
+              </Field>
+              <Field label="ИНН">
+                <Input value={state.company.taxId ?? ""} onChange={(event) => updateCompany({ taxId: event.target.value })} />
+              </Field>
+              <Field label="ОГРН / ОГРНИП">
+                <Input value={state.company.registrationId ?? ""} onChange={(event) => updateCompany({ registrationId: event.target.value })} />
+              </Field>
+              <Field label="Режим работы">
+                <Input value={state.company.workHours ?? ""} onChange={(event) => updateCompany({ workHours: event.target.value })} />
+              </Field>
+              <Field label="Руководитель">
+                <Input value={state.company.director ?? ""} onChange={(event) => updateCompany({ director: event.target.value })} />
+              </Field>
+            </CardContent>
+          </Card>
+        </TabsContent>
 
-        <Card className="xl:col-span-2">
-          <CardHeader><CardTitle>Реквизиты автосервиса</CardTitle></CardHeader>
-          <CardContent className="grid gap-4 sm:grid-cols-3">
-            <Field label="Название">
-              <Input value={state.company.name} onChange={(event) => setState((current) => ({ ...current, company: { ...current.company, name: event.target.value } }))} />
-            </Field>
-            <Field label="Адрес">
-              <Input value={state.company.address} onChange={(event) => setState((current) => ({ ...current, company: { ...current.company, address: event.target.value } }))} />
-            </Field>
-            <Field label="Телефон">
-              <Input value={state.company.phone} onChange={(event) => setState((current) => ({ ...current, company: { ...current.company, phone: event.target.value } }))} />
-            </Field>
-          </CardContent>
-        </Card>
-      </div>
+        <TabsContent value="rules">
+          <Card>
+            <CardHeader>
+              <CardTitle>Рабочие правила</CardTitle>
+              <p className="text-sm text-muted-foreground">Настройки по умолчанию для новых документов, мастеров и клиентской базы.</p>
+            </CardHeader>
+            <CardContent className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              <Field label="Способ оплаты по умолчанию">
+                <NativeSelect
+                  value={preferences.defaultPaymentMethod}
+                  onChange={(event) => updatePreferences({ defaultPaymentMethod: event.target.value as PaymentMethod })}
+                >
+                  {paymentMethods.map((method) => <option key={method} value={method}>{method}</option>)}
+                </NativeSelect>
+              </Field>
+              <Field label="Процент нового мастера">
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={preferences.defaultMechanicPercent}
+                  onChange={(event) => updatePreferences({ defaultMechanicPercent: Math.min(100, Math.max(0, Number(event.target.value) || 0)) })}
+                />
+              </Field>
+              <Field label="Гарантия, дней">
+                <Input
+                  type="number"
+                  min={0}
+                  value={preferences.warrantyDays}
+                  onChange={(event) => updatePreferences({ warrantyDays: Math.max(0, Number(event.target.value) || 0) })}
+                />
+              </Field>
+              <Field label="Префикс заказ-наряда">
+                <Input value={preferences.orderPrefix} onChange={(event) => updatePreferences({ orderPrefix: event.target.value })} />
+              </Field>
+              <label className="flex items-center gap-3 rounded-lg border border-border/60 bg-slate-50/70 px-3 py-2 text-sm font-medium">
+                <input
+                  type="checkbox"
+                  checked={preferences.requirePhoneForClient}
+                  onChange={(event) => updatePreferences({ requirePhoneForClient: event.target.checked })}
+                />
+                Требовать телефон в карточке клиента
+              </label>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
